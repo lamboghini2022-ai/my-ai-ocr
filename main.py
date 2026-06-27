@@ -45,12 +45,13 @@ async def process_ocr(req: OCRRequest):
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         
-        prompt = """Bạn là trợ lý AI xử lý tài liệu. Trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.
-Mỗi phần tử trong mảng JSON phải là MỘT CÂU NGẮN (tối đa 150 ký tự). Nếu câu gốc quá dài, HÃY TỰ ĐỘNG CẮT NGẮT thành nhiều phần tử liên tiếp nhau.
-QUY TẮC BẮT BUỘC:
-- "visual": Dùng mã LaTeX bọc trong $$...$$ (đứng một mình) hoặc \\( ... \\) (trong dòng) cho TẤT CẢ công thức. Giữ nguyên khoảng trắng và xuống dòng.
-- "spoken": Dịch công thức sang CHỮ TIẾNG VIỆT thuần túy để phát âm (vd: "x bình phương").
-- Tuyệt đối không thêm văn bản ngoài mảng JSON."""
+            const prompt = `Bạn là trợ lý AI xử lý tài liệu. Trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.
+CHÚ Ý QUAN TRỌNG ĐỂ KHÔNG BỊ LỖI AUDIO: Mỗi phần tử trong mảng JSON phải là MỘT CÂU NGẮN (tối đa 150 ký tự). Nếu câu gốc quá dài, HÃY TỰ ĐỘNG CẮT NGẮT thành nhiều phần tử liên tiếp nhau.
+
+QUY TẮC BẮT BUỘC CHO MẢNG JSON:
+- "visual": Dùng mã LaTeX bọc trong $$...$$ (đứng một mình) hoặc \\( ... \\) (trong dòng) cho TẤT CẢ công thức Toán/Hóa học để MathJax có thể vẽ. Giữ lại nguyên vẹn khoảng trắng (space) ở đầu dòng và ký tự xuống dòng (\\n) ở cuối để dựng layout như bản gốc.
+- "spoken": Dịch công thức sang CHỮ TIẾNG VIỆT thuần túy để máy tính phát âm (vd: "x bình phương", "H hai O").
+- Tuyệt đối không thêm văn bản ngoài mảng JSON.`;
 
         parts = []
         if req.file_base64 and req.mime_type:
