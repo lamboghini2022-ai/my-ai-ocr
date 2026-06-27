@@ -1,6 +1,4 @@
 fastapi
 uvicorn
-python-multipart
-gTTS
-google-generativeai
-mammoth
+httpx
+pydantic
