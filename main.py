@@ -1,113 +1,127 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
+import os
+import json
+import base64
+from io import BytesIO
+from typing import List, Optional
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-// Cấu hình Middleware
-app.use(cors());
-// Tăng giới hạn payload lên 50MB vì Base64 của ảnh/PDF khá nặng
-app.use(express.json({ limit: '50mb' })); 
-// Phục vụ các file tĩnh trong thư mục 'public' (Frontend)
-app.use(express.static(path.join(__dirname, 'public')));
+import google.generativeai as genai
+from gtts import gTTS  # <--- Đã thêm thư viện gTTS bị thiếu
 
-// ==========================================
-// 1. API GỌI GEMINI (Xử lý OCR)
-// ==========================================
-app.post('/api/extract', async (req, res) => {
-    try {
-        const { fileBase64, mimeType, rawText } = req.body;
-        const apiKey = process.env.GEMINI_API_KEY;
+api_key = os.getenv("GEMINI_API_KEY") 
+if api_key:
+    genai.configure(api_key=api_key)
 
-        if (!apiKey) {
-            return res.status(500).json({ error: "Server chưa cấu hình Gemini API Key" });
-        }
+app = FastAPI()
 
-        const modelName = "gemini-2.5-flash";
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        const prompt = `Bạn là trợ lý AI xử lý tài liệu. Trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.
-CHÚ Ý QUAN TRỌNG ĐỂ KHÔNG BỊ LỖI AUDIO: Mỗi phần tử trong mảng JSON phải là MỘT CÂU NGẮN (tối đa 150 ký tự). Nếu câu gốc quá dài, HÃY TỰ ĐỘNG CẮT NGẮT thành nhiều phần tử liên tiếp nhau.
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-QUY TẮC BẮT BUỘC CHO MẢNG JSON:
-- "visual": Dùng mã LaTeX bọc trong $$...$$ (đứng một mình) hoặc \\( ... \\) (trong dòng) cho TẤT CẢ công thức Toán/Hóa học để MathJax có thể vẽ. Giữ lại nguyên vẹn khoảng trắng (space) ở đầu dòng và ký tự xuống dòng (\\n) ở cuối để dựng layout như bản gốc.
-- "spoken": Dịch công thức sang CHỮ TIẾNG VIỆT thuần túy để máy tính phát âm (vd: "x bình phương", "H hai O").
-- Tuyệt đối không thêm văn bản ngoài mảng JSON.`;
+@app.get("/", response_class=HTMLResponse)
+async def read_index():
+    with open("static/index.html", "r", encoding="utf-8") as f:
+        return f.read()
 
-        let parts = [];
-        if (fileBase64 && mimeType) {
-            parts.push({ inlineData: { mimeType: mimeType, data: fileBase64 } });
-        }
-        if (rawText) {
-            parts.push({ text: "Dữ liệu gốc:\n" + rawText });
-        }
-        parts.push({ text: prompt });
+# -------------------------------------------------------------------
+# 1. API: XỬ LÝ OCR
+# -------------------------------------------------------------------
+class OCRRequest(BaseModel):
+    file_base64: Optional[str] = None
+    mime_type: Optional[str] = None
+    raw_text: Optional[str] = None
 
-        const payload = {
-            contents: [{ parts: parts }],
-            generationConfig: { temperature: 0.1 }
-        };
-
-        const response = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const errData = await response.json();
-            throw new Error(errData.error?.message || response.statusText);
-        }
-
-        const data = await response.json();
-        if (!data.candidates || data.candidates.length === 0) {
-            throw new Error("AI không trả về kết quả.");
-        }
+@app.post("/api/ocr")
+async def process_ocr(req: OCRRequest):
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
         
-        let resultText = data.candidates[0].content.parts[0].text;
-        resultText = resultText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        # Đã siết chặt Prompt để cấm AI tự bịa đặt (Ảo giác)
+        prompt = """Bạn là hệ thống OCR trích xuất văn bản và công thức toán học. Trả về kết quả dưới dạng DUY NHẤT một mảng JSON.
+Mỗi phần tử trong mảng JSON là MỘT CÂU NGẮN (tối đa 150 ký tự).
+QUY TẮC TỐI THƯỢNG (BẮT BUỘC TUÂN THỦ):
+1. CHỈ TRÍCH XUẤT CHÍNH XÁC NHỮNG GÌ NHÌN THẤY TRONG ẢNH. Tuyệt đối không tự bịa đặt, không thêm thắt văn bản, không tự tạo ví dụ mẫu. Nếu ảnh chỉ có 1 chữ/1 số, chỉ trả về đúng chữ/số đó.
+2. Nếu ảnh trống hoặc không có chữ, trả về mảng rỗng [].
+3. "visual": Dùng mã LaTeX bọc trong $$...$$ cho công thức.
+4. "spoken": Dịch công thức sang chữ Tiếng Việt thuần túy để phát âm."""
+
+        parts = []
+        if req.file_base64 and req.mime_type:
+            # Đã thêm lệnh giải mã Base64 sang Bytes để AI đọc được ảnh
+            file_bytes = base64.b64decode(req.file_base64)
+            parts.append({"mime_type": req.mime_type, "data": file_bytes})
+            
+        if req.raw_text:
+            parts.append(f"Dữ liệu gốc:\n{req.raw_text}")
+        parts.append(prompt)
+
+        # Ép AI luôn trả về JSON thuần
+        response = model.generate_content(
+            parts, 
+            generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
+        )
         
-        res.json({ result: JSON.parse(resultText) });
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    
+    except Exception as e:
+        print(f"Lỗi Server OCR: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    } catch (error) {
-        console.error("Lỗi API Gemini:", error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
+# -------------------------------------------------------------------
+# 2. API: TẠO AUDIO TỪNG CÂU
+# -------------------------------------------------------------------
+@app.get("/api/tts")
+async def single_tts(text: str, lang: str = "vi"):
+    try:
+        tts = gTTS(text=text, lang=lang)
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return Response(content=fp.read(), media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-// ==========================================
-// 2. API PROXY GỌI GOOGLE TTS (Sửa lỗi CORS)
-// ==========================================
-app.get('/api/tts', async (req, res) => {
-    try {
-        const { text, lang } = req.query;
-        if (!text) return res.status(400).send("Thiếu text");
+# -------------------------------------------------------------------
+# 3. API: GHÉP AUDIO HÀNG LOẠT (TẢI MP3)
+# -------------------------------------------------------------------
+class BulkTTSRequest(BaseModel):
+    texts: List[str]
+    lang: str = "vi"
+
+@app.post("/api/tts/bulk")
+async def bulk_tts(req: BulkTTSRequest):
+    try:
+        # Đã sửa lỗi tạo file MP3: Gộp chữ lại trước rồi mới xuất ra âm thanh
+        combined_text = " ".join([text.strip() for text in req.texts if text.strip()])
         
-        const targetUrl = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=${lang || 'vi'}&q=${encodeURIComponent(text)}`;
+        if not combined_text:
+            raise HTTPException(status_code=400, detail="Không có nội dung để đọc")
+
+        tts = gTTS(text=combined_text, lang=req.lang)
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
         
-        const response = await fetch(targetUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0' } // Giả lập trình duyệt để tránh bị Google chặn
-        });
+        return Response(content=fp.read(), media_type="audio/mpeg", headers={
+            "Content-Disposition": "attachment; filename=audiobook.mp3"
+        })
+    except Exception as e:
+        print(f"Lỗi Server MP3: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-        if (!response.ok) throw new Error("Google TTS từ chối kết nối");
-
-        // Set header để trả file Audio về thẳng Frontend
-        res.set('Content-Type', 'audio/mpeg');
-        
-        // Pipe data từ Google thẳng về Client
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        res.send(buffer);
-
-    } catch (error) {
-        console.error("Lỗi TTS Proxy:", error.message);
-        res.status(500).send("Lỗi tạo Audio");
-    }
-});
-
-// Khởi động server
-app.listen(PORT, () => {
-    console.log(`🚀 Server đang chạy tại http://localhost:${PORT}`);
-});
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
