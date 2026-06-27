@@ -15,8 +15,8 @@ from gtts import gTTS
 # =================================================================
 # CẤU HÌNH API KEY (KHUYẾN NGHỊ: Dùng biến môi trường / file .env)
 # =================================================================
-GEMINI_API_KEY = "AQ.Ab8RN6JPZdY7g9MkwT0odhKCKA4n2QGf119P86ooIJfdiknZVA"
-genai.configure(api_key=GEMINI_API_KEY)
+api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=api_key)
 
 app = FastAPI()
 
