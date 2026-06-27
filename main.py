@@ -9,13 +9,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import os
 import google.generativeai as genai
-from gtts import gTTS
 
-# =================================================================
-# CẤU HÌNH API KEY (KHUYẾN NGHỊ: Dùng biến môi trường / file .env)
-# =================================================================
-api_key = os.getenv("GEMINI_API_KEY")
+# Dòng này sẽ tự động lấy Key từ Render thay vì dán cứng vào code
+api_key = os.getenv("GEMINI_API_KEY") 
 genai.configure(api_key=api_key)
 
 app = FastAPI()
