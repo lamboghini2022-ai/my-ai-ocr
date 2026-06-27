@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-google-generativeai
+python-multipart
 gTTS
-pydantic
-python-dotenv
+google-generativeai
+mammoth
