@@ -26,59 +26,68 @@ class ExtractRequest(BaseModel):
 # ==========================================
 # 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
 # ==========================================
-@app.post("/api/extract")
+@app.post("/api/extract") # Chú ý: Đổi thành /api/ocr nếu frontend của bạn đang gọi đường dẫn đó
 async def extract_text(req: ExtractRequest):
-    # Lấy API Key từ biến môi trường (Environment Variable) trên Render
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return JSONResponse(
             status_code=500, 
-            content={"error": "Server chưa cấu hình biến môi trường GEMINI_API_KEY."}
+            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
         )
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
+    # Đã thêm lệnh bắt buộc AI phải "escape" dấu gạch chéo cho các đề toán
     prompt = (
-        "Bạn là trợ lý AI xử lý tài liệu. Trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
-        "CHÚ Ý QUAN TRỌNG ĐỂ KHÔNG BỊ LỖI AUDIO: Mỗi phần tử trong mảng JSON phải là MỘT CÂU NGẮN (tối đa 150 ký tự). "
-        "Nếu câu gốc quá dài, HÃY TỰ ĐỘNG CẮT NGẮT thành nhiều phần tử liên tiếp nhau.\n\n"
-        "QUY TẮC BẮT BUỘC CHO MẢNG JSON:\n"
-        "- \"visual\": Dùng mã LaTeX bọc trong $$...$$ (đứng một mình) hoặc \\( ... \\) (trong dòng) cho TẤT CẢ công thức Toán/Hóa học để MathJax có thể vẽ. Giữ lại nguyên vẹn khoảng trắng (space) ở đầu dòng và ký tự xuống dòng (\\n) ở cuối để dựng layout như bản gốc.\n"
-        "- \"spoken\": Dịch công thức sang CHỮ TIẾNG VIỆT thuần túy để máy tính phát âm (vd: \"x bình phương\", \"H hai O\").\n"
-        "- Tuyệt đối không thêm văn bản ngoài mảng JSON."
+        "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
+        "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
+        "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
+        "- Dùng mã LaTeX cho công thức toán học.\n"
+        "- BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) trong mã LaTeX phải được escape bằng 2 dấu gạch chéo (\\\\) để JSON hợp lệ. "
+        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim."
     )
 
     parts = []
     if req.fileBase64 and req.mimeType:
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": req.fileBase64}})
     if req.rawText:
-        parts.append({"text": f"Dữ liệu gốc:\n{req.rawText}"})
+        parts.append({"text": req.rawText})
     parts.append({"text": prompt})
 
+    # [BẢN VÁ LỖI]: Bắt buộc thêm block generationConfig để Gemini trả về JSON chuẩn 100%
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.1}
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json" 
+        }
     }
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(url, json=payload, timeout=60.0)
             if response.status_code != 200:
-                return JSONResponse(status_code=response.status_code, content={"error": response.text})
+                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini API: {response.text}"})
             
             data = response.json()
-            if "candidates" not in data or not data["candidates"]:
-                return JSONResponse(status_code=500, content={"error": "AI không phản hồi kết quả hợp lệ."})
+            raw_result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             
-            result_text = data["candidates"][0]["content"]["parts"][0]["text"]
-            # Làm sạch chuỗi bao bọc markdown nếu có
-            result_text = result_text.replace("```json", "").replace("```", "").strip()
+            # Làm sạch nếu AI lỡ tay bọc Markdown
+            clean_text = raw_result.replace("```json", "").replace("```", "").strip()
             
-            parsed_json = json.loads(result_text)
+            # [BẢN VÁ LỖI]: Thêm strict=False để Python bỏ qua các lỗi ký tự điều khiển ẩn (như dấu \n, \t)
+            try:
+                parsed_json = json.loads(clean_text, strict=False)
+            except json.JSONDecodeError:
+                # Lưới bảo vệ cuối cùng: Tự động sửa lỗi backslash toán học bằng Python nếu AI vẫn làm sai
+                fixed_text = clean_text.replace('\\', '\\\\').replace('\\\\"', '\\"')
+                parsed_json = json.loads(fixed_text, strict=False)
+                
             return {"result": parsed_json}
+            
         except Exception as e:
-            return JSONResponse(status_code=500, content={"error": str(e)})
+            return JSONResponse(status_code=500, content={"error": f"Lỗi hệ thống hoặc định dạng: {str(e)}"})
 
 # ==========================================
 # 2. API PROXY GOOGLE TTS (Sửa triệt để lỗi CORS)
