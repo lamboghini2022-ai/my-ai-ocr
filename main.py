@@ -52,7 +52,9 @@ async def extract_text(req: ExtractRequest):
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-prompt = (
+
+    # BẢN VÁ PROMPT: Dạy AI không in lại hàng ngàn dấu chấm
+    prompt = (
         "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
         "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
         "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
@@ -79,7 +81,8 @@ prompt = (
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 0.1,
-            "responseMimeType": "application/json" 
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 8192 # BẢN VÁ TOKEN: Tăng giới hạn trả về của AI để không bị đứt đoạn
         },
         "safetySettings": [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
