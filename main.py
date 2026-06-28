@@ -52,14 +52,14 @@ async def extract_text(req: ExtractRequest):
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-
-    prompt = (
+prompt = (
         "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
         "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
         "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
         "- Dùng mã LaTeX cho công thức toán học.\n"
         "- BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) trong mã LaTeX phải được escape bằng 2 dấu gạch chéo (\\\\) để JSON hợp lệ. "
-        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim."
+        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim.\n"
+        "- ĐẶC BIỆT: NẾU GẶP CÁC DÒNG DẤU CHẤM HOẶC GẠCH NGANG DÀI (ví dụ: ........ hoặc _______) dùng để điền đáp án, hãy rút gọn chúng lại thành 3 dấu chấm '...'. Tuyệt đối không in ra hàng ngàn dấu chấm."
     )
 
     parts = []
