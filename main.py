@@ -26,7 +26,7 @@ class ExtractRequest(BaseModel):
 # ==========================================
 # 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
 # ==========================================
-@app.post("/api/extract") # Chú ý: Đổi thành /api/ocr nếu frontend của bạn đang gọi đường dẫn đó
+@app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -55,13 +55,31 @@ async def extract_text(req: ExtractRequest):
         parts.append({"text": req.rawText})
     parts.append({"text": prompt})
 
-    # [BẢN VÁ LỖI]: Bắt buộc thêm block generationConfig để Gemini trả về JSON chuẩn 100%
+    # Cập nhật: Thêm block generationConfig và tắt bộ lọc an toàn để tránh báo động giả
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json" 
-        }
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            }
+        ]
     }
 
     async with httpx.AsyncClient() as client:
@@ -71,16 +89,26 @@ async def extract_text(req: ExtractRequest):
                 return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini API: {response.text}"})
             
             data = response.json()
-            raw_result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            
+            # Cập nhật: Kiểm tra xem API có trả về 'content' hay bị chặn bởi lý do khác
+            candidate = data.get("candidates", [])[0]
+            if "content" not in candidate:
+                finish_reason = candidate.get("finishReason", "Lý do không xác định")
+                return JSONResponse(
+                    status_code=400, 
+                    content={"error": f"AI từ chối trả lời. Lý do (Finish Reason): {finish_reason}."}
+                )
+
+            raw_result = candidate["content"]["parts"][0]["text"].strip()
             
             # Làm sạch nếu AI lỡ tay bọc Markdown
             clean_text = raw_result.replace("```json", "").replace("```", "").strip()
             
-            # [BẢN VÁ LỖI]: Thêm strict=False để Python bỏ qua các lỗi ký tự điều khiển ẩn (như dấu \n, \t)
+            # Thêm strict=False để Python bỏ qua các lỗi ký tự điều khiển ẩn
             try:
                 parsed_json = json.loads(clean_text, strict=False)
             except json.JSONDecodeError:
-                # Lưới bảo vệ cuối cùng: Tự động sửa lỗi backslash toán học bằng Python nếu AI vẫn làm sai
+                # Lưới bảo vệ cuối cùng: Tự động sửa lỗi backslash toán học bằng Python
                 fixed_text = clean_text.replace('\\', '\\\\').replace('\\\\"', '\\"')
                 parsed_json = json.loads(fixed_text, strict=False)
                 
