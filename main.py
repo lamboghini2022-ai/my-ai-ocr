@@ -1,6 +1,7 @@
 import os
 import json
 import httpx
+import asyncio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,24 +10,29 @@ from typing import Optional
 
 app = FastAPI()
 
-# Cấu hình phục vụ các file tĩnh nằm trong thư mục 'static'
+# 1. Cấu hình phục vụ các file tĩnh
+if not os.path.exists("static"):
+    os.makedirs("static")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Tuyến đường mặc định khi truy cập vào trang web
 @app.get("/")
 async def read_index():
     return FileResponse("static/index.html")
 
-# Khai báo cấu trúc dữ liệu gửi lên từ Frontend
+# 2. Khai báo cấu trúc dữ liệu
 class ExtractRequest(BaseModel):
     fileBase64: Optional[str] = None
     mimeType: Optional[str] = None
     rawText: Optional[str] = None
 
+class BulkTTSRequest(BaseModel):
+    texts: list[str]
+    lang: str = "vi"
+
 # ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
+# API 1: XỬ LÝ OCR & TRÍCH XUẤT ĐỀ TOÁN QUA GEMINI
 # ==========================================
-@app.post("/api/extract") # Chú ý: Đổi thành /api/ocr nếu frontend của bạn đang gọi đường dẫn đó
+@app.post("/api/ocr")
 async def extract_text(req: ExtractRequest):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -38,7 +44,6 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # Đã thêm lệnh bắt buộc AI phải "escape" dấu gạch chéo cho các đề toán
     prompt = (
         "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
         "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
@@ -55,7 +60,6 @@ async def extract_text(req: ExtractRequest):
         parts.append({"text": req.rawText})
     parts.append({"text": prompt})
 
-    # [BẢN VÁ LỖI]: Bắt buộc thêm block generationConfig để Gemini trả về JSON chuẩn 100%
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
@@ -72,15 +76,12 @@ async def extract_text(req: ExtractRequest):
             
             data = response.json()
             raw_result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            
-            # Làm sạch nếu AI lỡ tay bọc Markdown
             clean_text = raw_result.replace("```json", "").replace("```", "").strip()
             
-            # [BẢN VÁ LỖI]: Thêm strict=False để Python bỏ qua các lỗi ký tự điều khiển ẩn (như dấu \n, \t)
+            # Xử lý an toàn các ký tự điều khiển Toán học
             try:
                 parsed_json = json.loads(clean_text, strict=False)
             except json.JSONDecodeError:
-                # Lưới bảo vệ cuối cùng: Tự động sửa lỗi backslash toán học bằng Python nếu AI vẫn làm sai
                 fixed_text = clean_text.replace('\\', '\\\\').replace('\\\\"', '\\"')
                 parsed_json = json.loads(fixed_text, strict=False)
                 
@@ -90,13 +91,12 @@ async def extract_text(req: ExtractRequest):
             return JSONResponse(status_code=500, content={"error": f"Lỗi hệ thống hoặc định dạng: {str(e)}"})
 
 # ==========================================
-# 2. API PROXY GOOGLE TTS (Sửa triệt để lỗi CORS)
+# API 2: ĐỌC TỪNG CÂU (Audio Player)
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
-    # Giả lập User-Agent trình duyệt để Google không chặn IP của Render
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     async def stream_audio():
         async with httpx.AsyncClient() as client:
@@ -106,7 +106,30 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
 
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
-# Chạy Server cục bộ khi test máy cá nhân
+# ==========================================
+# API 3: GHÉP FILE MP3 TỔNG ĐỂ TẢI VỀ
+# ==========================================
+@app.post("/api/tts/bulk")
+async def get_bulk_tts(req: BulkTTSRequest):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    async def generate_bulk_audio():
+        async with httpx.AsyncClient() as client:
+            for text in req.texts:
+                if not text.strip(): 
+                    continue
+                target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+                try:
+                    response = await client.get(target_url, headers=headers)
+                    if response.status_code == 200:
+                        yield response.content 
+                    await asyncio.sleep(1) # Nghỉ 1s tránh bị Google chặn
+                except Exception:
+                    continue
+
+    return StreamingResponse(generate_bulk_audio(), media_type="audio/mpeg")
+
+# Chạy Server cục bộ
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
