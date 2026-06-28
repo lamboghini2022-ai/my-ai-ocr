@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-# Thử load file .env (nếu bạn đang dùng file .env ở máy cá nhân)
+# Thử load file .env
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,13 +17,11 @@ except ImportError:
 
 app = FastAPI()
 
-# Đảm bảo thư mục 'static' tồn tại để không lỗi khi khởi động
 if not os.path.exists("static"):
     os.makedirs("static")
     with open("static/index.html", "w", encoding="utf-8") as f:
         f.write("<h1>Trang chủ Backend</h1>")
 
-# Cấu hình phục vụ các file tĩnh
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -53,21 +51,22 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # BẢN VÁ PROMPT: Dạy AI không in lại hàng ngàn dấu chấm
+    # BẢN VÁ PROMPT: Ép AI băm nhỏ văn bản để lách lỗi bản quyền (RECITATION)
     prompt = (
         "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
-        "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
-        "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
-        "- Dùng mã LaTeX cho công thức toán học.\n"
-        "- BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) trong mã LaTeX phải được escape bằng 2 dấu gạch chéo (\\\\) để JSON hợp lệ. "
-        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim.\n"
-        "- ĐẶC BIỆT: NẾU GẶP CÁC DÒNG DẤU CHẤM HOẶC GẠCH NGANG DÀI (ví dụ: ........ hoặc _______) dùng để điền đáp án, hãy rút gọn chúng lại thành 3 dấu chấm '...'. Tuyệt đối không in ra hàng ngàn dấu chấm."
+        "Mỗi phần tử có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
+        "🚨 LƯU Ý TỐI QUAN TRỌNG (CHỐNG LỖI RECITATION BẢN QUYỀN):\n"
+        "- API sẽ tự động khóa luồng nếu bạn in ra một đoạn văn hoặc bài thơ dài liên tục.\n"
+        "- ĐỂ LÁCH LỖI: BẮT BUỘC băm nhỏ văn bản đến mức tối đa! Tách TỪNG DÒNG chữ ngắn trên ảnh thành MỘT phần tử JSON riêng biệt.\n"
+        "- Tuyệt đối KHÔNG gộp nhiều dòng thơ/văn vào chung một giá trị string (ví dụ: cấm dùng \\n để nối dòng). Phải dùng cấu trúc JSON để ngắt mạch văn bản liên tục.\n\n"
+        "LƯU Ý VỀ ĐỊNH DẠNG KHÁC:\n"
+        "- Dùng mã LaTeX cho toán học. BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) phải được escape bằng 2 dấu (\\\\). Ví dụ: \\\\frac thay vì \\frac.\n"
+        "- Rút gọn các dòng dấu chấm hoặc gạch ngang dài để điền đáp án (ví dụ: ........) thành 3 dấu chấm '...'."
     )
 
     parts = []
     
     if req.fileBase64 and req.mimeType:
-        # BẢN VÁ QUAN TRỌNG: Xóa tiền tố 'data:image/...;base64,' nếu frontend lỡ gửi kèm
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
         print("[THÔNG TIN] Đã nhận và dọn dẹp chuỗi Base64 từ Frontend.")
@@ -82,7 +81,7 @@ async def extract_text(req: ExtractRequest):
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
-            "maxOutputTokens": 8192 # BẢN VÁ TOKEN: Tăng giới hạn trả về của AI để không bị đứt đoạn
+            "maxOutputTokens": 8192
         },
         "safetySettings": [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -103,7 +102,6 @@ async def extract_text(req: ExtractRequest):
             
             data = response.json()
             
-            # KIỂM TRA LỖI PROMPT (Bị chặn từ vòng gửi xe)
             candidates = data.get("candidates", [])
             if not candidates:
                 prompt_feedback = data.get("promptFeedback", {})
@@ -115,19 +113,18 @@ async def extract_text(req: ExtractRequest):
                 
             candidate = candidates[0]
             
-            # KIỂM TRA LỖI CONTENT (Bị chặn bởi Safety Filter sau khi tạo text)
             if "content" not in candidate:
                 finish_reason = candidate.get("finishReason", "Lý do không xác định")
                 print("[LỖI AN TOÀN] Bị chặn bởi Safety Filter. Finish Reason:", finish_reason)
+                # Bắt lỗi hiển thị chi tiết nguyên nhân (ví dụ: RECITATION)
                 return JSONResponse(
                     status_code=400, 
-                    content={"error": f"AI từ chối trả lời do Safety Filter. Lý do: {finish_reason}."}
+                    content={"error": f"AI từ chối trả lời do Safety Filter. Lý do: {finish_reason}. (Nếu là RECITATION: Do quét dính bản quyền thơ/văn)"}
                 )
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             clean_text = raw_result.replace("```json", "").replace("```", "").strip()
             
-            # XỬ LÝ VÀ SỬA LỖI JSON
             try:
                 parsed_json = json.loads(clean_text, strict=False)
                 print("[THÀNH CÔNG] Đã trích xuất và parse JSON hoàn tất!")
@@ -141,7 +138,6 @@ async def extract_text(req: ExtractRequest):
                     return {"result": parsed_json}
                 except Exception as parse_err:
                     print(f"[LỖI ĐỊNH DẠNG] Không thể parse JSON: {parse_err}")
-                    print(f"--- ĐÂY LÀ KẾT QUẢ RAW TỪ AI TRẢ VỀ ---\n{clean_text}\n-------------------")
                     return JSONResponse(
                         status_code=500, 
                         content={
@@ -153,15 +149,13 @@ async def extract_text(req: ExtractRequest):
             
         except httpx.ReadTimeout:
             print("[LỖI MẠNG] Timeout - Gọi API Google quá 60s không có phản hồi.")
-            return JSONResponse(status_code=504, content={"error": "Hết thời gian chờ từ Google API. Ảnh có thể quá nặng hoặc đường truyền chậm."})
+            return JSONResponse(status_code=504, content={"error": "Hết thời gian chờ từ Google API."})
         except Exception as e:
             import traceback
-            print("[LỖI NGHIÊM TRỌNG (CRASH BE)]:")
             traceback.print_exc()
-            error_detail = str(e) if str(e) else repr(e)
             return JSONResponse(
                 status_code=500, 
-                content={"error": f"Lỗi hệ thống hoặc định dạng: {error_detail}"}
+                content={"error": f"Lỗi hệ thống: {str(e)}"}
             )
 
 # ==========================================
