@@ -3,6 +3,7 @@ import json
 import httpx
 import re
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware # BƯỚC 1: Import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -16,6 +17,17 @@ except ImportError:
     pass
 
 app = FastAPI()
+
+# ==========================================
+# BƯỚC 2: CẤU HÌNH CORS ĐỂ SỬA LỖI OPTIONS 405
+# ==========================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cho phép mọi Frontend gọi tới. Nếu muốn bảo mật hơn, thay "*" bằng URL frontend của bạn.
+    allow_credentials=True,
+    allow_methods=["*"],  # Cho phép mọi phương thức (GET, POST, OPTIONS, PUT, DELETE,...)
+    allow_headers=["*"],  # Cho phép mọi header
+)
 
 if not os.path.exists("static"):
     os.makedirs("static")
@@ -177,4 +189,6 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # Trên Render, tham số reload=True có thể gây lỗi nếu chạy Start Command riêng. 
+    # Tốt nhất nên cấu hình gunicorn/uvicorn trực tiếp trên dashboard của Render.
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
