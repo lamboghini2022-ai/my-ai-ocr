@@ -74,7 +74,7 @@ async def extract_text(req: ExtractRequest):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # BẢN VÁ PROMPT TỐI ƯU: Ép AI chia nhỏ câu để chống lỗi Recitation (Bản quyền văn bản dài của Google)
-    prompt = (
+     prompt = (
         "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
         "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
         "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
