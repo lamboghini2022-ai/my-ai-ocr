@@ -6,33 +6,49 @@ import io
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-# Thử load file .env nếu có
+# Thử tải biến môi trường từ file .env nếu chạy local
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-app = FastAPI()
+app = FastAPI(title="SaaS OCR Reader Backend")
 
-# Tạo thư mục static nếu chưa tồn tại
+# ==========================================
+# CẤU HÌNH QUAN TRỌNG: CORS MIDDLEWARE
+# Vì giao diện HTML chạy độc lập (Local hoặc Host khác như Vercel/Netlify),
+# Backend trên Render bắt buộc phải cho phép Cross-Origin để không bị chặn kết nối.
+# ==========================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Cho phép tất cả các Origin truy cập. Bạn có thể thay đổi thành domain cụ thể nếu muốn bảo mật hơn.
+    allow_credentials=True,
+    allow_methods=["*"],  # Cho phép mọi phương thức (GET, POST, OPTIONS,...)
+    allow_headers=["*"],  # Cho phép mọi Headers gửi lên
+)
+
+# Tạo thư mục static dự phòng nếu chạy chế độ monolithic
 if not os.path.exists("static"):
     os.makedirs("static")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
-async def read_index():
-    # Kiểm tra xem file index.html có nằm trong thư mục hiện tại hoặc static không
-    if os.path.exists("static/index.html"):
-        return FileResponse("static/index.html")
-    elif os.path.exists("index.html"):
-        return FileResponse("index.html")
-    else:
-        return JSONResponse(status_code=404, content={"error": "Không tìm thấy file index.html giao diện."})
+async def root_endpoint():
+    return JSONResponse(content={
+        "status": "online",
+        "message": "Backend OCR Reader đang chạy thành công trên Render!",
+        "endpoints": {
+            "OCR & Extract": "/api/extract [POST]",
+            "TTS Stream": "/api/tts [GET]",
+            "TTS Bulk Download": "/api/tts/bulk [POST]"
+        }
+    })
 
 class ExtractRequest(BaseModel):
     fileBase64: Optional[str] = None
@@ -44,38 +60,37 @@ class ExtractRequest(BaseModel):
 # ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR ==========")
+    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR LÀM MỚI ==========")
     
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[LỖI NGHIÊM TRỌNG] Chưa có GEMINI_API_KEY")
+        print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
         return JSONResponse(
             status_code=500, 
-            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Server."}
+            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
         )
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # BẢN VÁ PROMPT: Ép AI băm nhỏ văn bản để lách lỗi bản quyền (RECITATION)
+    # BẢN VÁ PROMPT TỐI ƯU: Ép AI chia nhỏ câu để chống lỗi Recitation (Bản quyền văn bản dài của Google)
     prompt = (
-        "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
-        "Mỗi phần tử có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
-        "🚨 LƯU Ý TỐI QUAN TRỌNG (CHỐNG LỖI RECITATION BẢN QUYỀN):\n"
-        "- API sẽ tự động khóa luồng nếu bạn in ra một đoạn văn hoặc bài thơ dài liên tục.\n"
-        "- ĐỂ LÁCH LỖI: BẮT BUỘC băm nhỏ văn bản đến mức tối đa! Tách TỪNG DÒNG chữ ngắn trên ảnh thành MỘT phần tử JSON riêng biệt.\n"
-        "- Tuyệt đối KHÔNG gộp nhiều dòng thơ/văn vào chung một giá trị string (ví dụ: cấm dùng \\n để nối dòng). Phải dùng cấu trúc JSON để ngắt mạch văn bản liên tục.\n\n"
-        "LƯU Ý VỀ ĐỊNH DẠNG KHÁC:\n"
-        "- Dùng mã LaTeX cho toán học. BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) phải được escape bằng 2 dấu (\\\\). Ví dụ: \\\\frac thay vì \\frac.\n"
-        "- Rút gọn các dòng dấu chấm hoặc gạch ngang dài để điền đáp án (ví dụ: ........) thành 3 dấu chấm '...'."
+        "Bạn là AI trích xuất tài liệu OCR chuyên nghiệp. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
+        "Mỗi phần tử trong mảng có cấu trúc chuẩn xác như sau: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
+        "🚨 LƯU Ý BẮT BUỘC ĐỂ LÁCH LỖI RECITATION BẢN QUYỀN:\n"
+        "- Google API tự động ngắt kết nối nếu phát hiện văn bản liên tục quá dài.\n"
+        "- GIẢI PHÁP: Hãy chia nhỏ tối đa văn bản! Mỗi dòng chữ, mỗi câu thơ ngắn, hoặc tối đa một câu văn ngắn phải là MỘT phần tử JSON riêng biệt.\n"
+        "- Không gộp nhiều dòng văn/thơ vào chung một phần tử. Không dùng ký tự ngắt dòng \\n trong chuỗi.\n\n"
+        "CÁC QUY TẮC ĐỊNH DẠNG KHÁC:\n"
+        "- Sử dụng mã ký hiệu LaTeX cho các công thức toán học. Mọi dấu gạch chéo ngược (\\) bắt buộc phải được double escape thành (\\\\). Ví dụ: \\\\frac{a}{b}.\n"
+        "- Rút ngắn chuỗi dấu chấm điền từ (........) dài dòng thành 3 dấu chấm gọn gàng '...'."
     )
 
     parts = []
-    
     if req.fileBase64 and req.mimeType:
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
-        print("[THÔNG TIN] Đã nhận và dọn dẹp chuỗi Base64 từ Frontend.")
+        print("[INFO] Đã chuẩn hóa chuỗi Base64 tài liệu đính kèm.")
         
     if req.rawText:
         parts.append({"text": req.rawText})
@@ -93,54 +108,54 @@ async def extract_text(req: ExtractRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            print("[THÔNG TIN] Đang gửi yêu cầu lên Google Gemini...")
+            print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
             response = await client.post(url, json=payload, timeout=60.0)
             
             if response.status_code != 200:
-                print(f"[LỖI API GOOGLE] HTTP {response.status_code} - {response.text}")
-                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini API: {response.text}"})
+                print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code} - {response.text}")
+                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi phản hồi từ Gemini: {response.text}"})
             
             data = response.json()
             candidates = data.get("candidates", [])
             if not candidates:
                 prompt_feedback = data.get("promptFeedback", {})
-                print("[LỖI AN TOÀN] Bị chặn từ vòng gửi xe (Prompt Feedback):", prompt_feedback)
-                return JSONResponse(status_code=400, content={"error": f"API chặn yêu cầu. {prompt_feedback}"})
+                print("[SAFETY BLOCKED] Yêu cầu bị từ chối từ bộ lọc an toàn đầu vào:", prompt_feedback)
+                return JSONResponse(status_code=400, content={"error": f"Yêu cầu bị chặn bởi chính sách an toàn đầu vào của Google. {prompt_feedback}"})
                 
             candidate = candidates[0]
             if "content" not in candidate:
-                finish_reason = candidate.get("finishReason", "Lý do không xác định")
-                print("[LỖI AN TOÀN] Bị chặn bởi Safety Filter. Finish Reason:", finish_reason)
-                return JSONResponse(status_code=400, content={"error": f"AI từ chối trả lời do bộ lọc an toàn ({finish_reason})."})
+                finish_reason = candidate.get("finishReason", "Không xác định")
+                print("[SAFETY FILTER TRIGGERED] Bị chặn ở luồng đầu ra. Lý do:", finish_reason)
+                return JSONResponse(status_code=400, content={"error": f"AI không thể xuất kết quả do vi phạm bộ lọc đầu ra ({finish_reason})."})
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             clean_text = raw_result.replace("```json", "").replace("```", "").strip()
             
             try:
                 parsed_json = json.loads(clean_text, strict=False)
-                print("[THÀNH CÔNG] Đã trích xuất và parse JSON hoàn tất!")
+                print("[SUCCESS] Trích xuất thành công và biên dịch định dạng JSON sạch.")
                 return {"result": parsed_json}
             except json.JSONDecodeError:
-                print("[CẢNH BÁO] Lỗi Parse JSON lần 1, đang kích hoạt bộ sửa lỗi tự động...")
+                print("[REPAIRING] Lỗi cấu trúc JSON thô, đang áp dụng bộ vá chuỗi tự động...")
                 try:
                     fixed_text = clean_text.replace('\\', '\\\\').replace('\\\\"', '\\"')
                     parsed_json = json.loads(fixed_text, strict=False)
-                    print("[THÀNH CÔNG] Đã sửa lỗi backslash và parse JSON thành công!")
+                    print("[SUCCESS] Đã sửa lỗi escape ký tự và biên dịch JSON thành công.")
                     return {"result": parsed_json}
                 except Exception as parse_err:
-                    print(f"[LỖI ĐỊNH DẠNG] Không thể parse JSON: {parse_err}")
-                    return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi lỗi cấu trúc không thể parse thành JSON.", "chi_tiet_loi": str(parse_err), "ket_qua_tho": clean_text})
+                    print(f"[CRITICAL ERROR] Không thể cứu vãn cấu trúc JSON: {parse_err}")
+                    return JSONResponse(status_code=500, content={"error": "Cấu trúc phản hồi từ AI bị lỗi định dạng nghiêm trọng.", "raw": clean_text})
             
         except httpx.ReadTimeout:
-            print("[LỖI MẠNG] Timeout - Gọi API Google quá 60s không có phản hồi.")
-            return JSONResponse(status_code=504, content={"error": "Hết thời gian chờ phản hồi từ Google API quá 60 giây."})
+            print("[TIMEOUT] Google API không phản hồi trong 60 giây.")
+            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi (60 giây) khi kết nối với hệ thống Google API."})
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return JSONResponse(status_code=500, content={"error": f"Lỗi hệ thống Backend: {str(e)}"})
+            return JSONResponse(status_code=500, content={"error": f"Lỗi xử lý hệ thống nội bộ: {str(e)}"})
 
 # ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
+# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU VỚI CORS)
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
@@ -156,7 +171,7 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
 # ==========================================
-# 3. API GHÉP MP3 HÀNG LOẠT (TẢI FILE TỔNG HỢP)
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT (TẢI TRỌN BỘ OFFLINE)
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -164,7 +179,7 @@ class BulkTTSRequest(BaseModel):
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\\n========== BẮT ĐẦU GHÉP AUDIO HÀNG LOẠT ({len(req.texts)} câu) ==========")
+    print(f"\n========== BẮT ĐẦU TỔNG HỢP VÀ GHÉP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
     
@@ -178,15 +193,15 @@ async def bulk_tts(req: BulkTTSRequest):
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
             except Exception as e:
-                print(f"[CẢNH BÁO] Lỗi khi tải audio cho câu: '{text[:20]}...'. Chi tiết: {e}")
+                print(f"[WARNING] Bỏ qua lỗi tải đoạn âm thanh cho câu: '{text[:20]}...'. Chi tiết: {e}")
                 
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không lấy được dữ liệu âm thanh nào từ TTS Server."})
+        return JSONResponse(status_code=500, content={"error": "Toàn bộ chuỗi audio tải về trống hoặc không thể kết nối tới máy chủ TTS."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
         media_type="audio/mpeg",
-        headers={"Content-Disposition": "attachment; filename=OCR_AudioBook.mp3"}
+        headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
     )
 
 if __name__ == "__main__":
