@@ -75,15 +75,21 @@ async def extract_text(req: ExtractRequest):
 
     # BẢN VÁ PROMPT TỐI ƯU: Ép AI chia nhỏ câu để chống lỗi Recitation (Bản quyền văn bản dài của Google)
     prompt = (
-        "Bạn là AI trích xuất tài liệu OCR chuyên nghiệp. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
-        "Mỗi phần tử trong mảng có cấu trúc chuẩn xác như sau: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
-        "🚨 LƯU Ý BẮT BUỘC ĐỂ LÁCH LỖI RECITATION BẢN QUYỀN:\n"
-        "- Google API tự động ngắt kết nối nếu phát hiện văn bản liên tục quá dài.\n"
-        "- GIẢI PHÁP: Hãy chia nhỏ tối đa văn bản! Mỗi dòng chữ, mỗi câu thơ ngắn, hoặc tối đa một câu văn ngắn phải là MỘT phần tử JSON riêng biệt.\n"
-        "- Không gộp nhiều dòng văn/thơ vào chung một phần tử. Không dùng ký tự ngắt dòng \\n trong chuỗi.\n\n"
-        "CÁC QUY TẮC ĐỊNH DẠNG KHÁC:\n"
-        "- Sử dụng mã ký hiệu LaTeX cho các công thức toán học. Mọi dấu gạch chéo ngược (\\) bắt buộc phải được double escape thành (\\\\). Ví dụ: \\\\frac{a}{b}.\n"
-        "- Rút ngắn chuỗi dấu chấm điền từ (........) dài dòng thành 3 dấu chấm gọn gàng '...'."
+        "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
+        "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
+        "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
+        "- Dùng mã LaTeX cho công thức toán học.\n"
+        "- BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) trong mã LaTeX phải được escape bằng 2 dấu gạch chéo (\\\\) để JSON hợp lệ. "
+        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim.\n"
+        "- ĐẶC BIỆT: NẾU GẶP CÁC DÒNG DẤU CHẤM HOẶC GẠCH NGANG DÀI (ví dụ: ........ hoặc _______) dùng để điền đáp án, hãy rút gọn chúng lại thành 3 dấu chấm '...'. Tuyệt đối không in ra hàng ngàn dấu chấm."
+        "Mỗi phần tử có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
+        "🚨 LƯU Ý TỐI QUAN TRỌNG (CHỐNG LỖI RECITATION BẢN QUYỀN):\n"
+        "- API sẽ tự động khóa luồng nếu bạn in ra một đoạn văn hoặc bài thơ dài liên tục.\n"
+        "- ĐỂ LÁCH LỖI: BẮT BUỘC băm nhỏ văn bản đến mức tối đa! Tách TỪNG DÒNG chữ ngắn trên ảnh thành MỘT phần tử JSON riêng biệt.\n"
+        "- Tuyệt đối KHÔNG gộp nhiều dòng thơ/văn vào chung một giá trị string (ví dụ: cấm dùng \\n để nối dòng). Phải dùng cấu trúc JSON để ngắt mạch văn bản liên tục.\n\n"
+        "LƯU Ý VỀ ĐỊNH DẠNG KHÁC:\n"
+        "- Dùng mã LaTeX cho toán học. BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) phải được escape bằng 2 dấu (\\\\). Ví dụ: \\\\frac thay vì \\frac.\n"
+        "- Rút gọn các dòng dấu chấm hoặc gạch ngang dài để điền đáp án (ví dụ: ........) thành 3 dấu chấm '...'."
     )
 
     parts = []
