@@ -74,40 +74,46 @@ async def extract_text(req: ExtractRequest):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # BẢN VÁ PROMPT TỐI ƯU: Ép AI chia nhỏ câu để chống lỗi Recitation (Bản quyền văn bản dài của Google)
-     prompt = (
-        "Bạn là AI trích xuất tài liệu OCR. Hãy trích xuất toàn bộ văn bản và trả về DUY NHẤT một mảng JSON.\n"
-        "Mỗi phần tử là một câu, có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n"
-        "LƯU Ý QUAN TRỌNG CHO ĐỀ TOÁN:\n"
-        "- Dùng mã LaTeX cho công thức toán học.\n"
-        "- BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) trong mã LaTeX phải được escape bằng 2 dấu gạch chéo (\\\\) để JSON hợp lệ. "
-        "Ví dụ: viết \\\\frac thay vì \\frac, viết \\\\lim thay vì \\lim.\n"
-        "- ĐẶC BIỆT: NẾU GẶP CÁC DÒNG DẤU CHẤM HOẶC GẠCH NGANG DÀI (ví dụ: ........ hoặc _______) dùng để điền đáp án, hãy rút gọn chúng lại thành 3 dấu chấm '...'. Tuyệt đối không in ra hàng ngàn dấu chấm."
-        "Mỗi phần tử có định dạng: {\"visual\": \"...\", \"spoken\": \"...\"}.\n\n"
-        "🚨 LƯU Ý TỐI QUAN TRỌNG (CHỐNG LỖI RECITATION BẢN QUYỀN):\n"
-        "- API sẽ tự động khóa luồng nếu bạn in ra một đoạn văn hoặc bài thơ dài liên tục.\n"
-        "- ĐỂ LÁCH LỖI: BẮT BUỘC băm nhỏ văn bản đến mức tối đa! Tách TỪNG DÒNG chữ ngắn trên ảnh thành MỘT phần tử JSON riêng biệt.\n"
-        "- Tuyệt đối KHÔNG gộp nhiều dòng thơ/văn vào chung một giá trị string (ví dụ: cấm dùng \\n để nối dòng). Phải dùng cấu trúc JSON để ngắt mạch văn bản liên tục.\n\n"
-        "LƯU Ý VỀ ĐỊNH DẠNG KHÁC:\n"
-        "- Dùng mã LaTeX cho toán học. BẮT BUỘC: Mọi dấu gạch chéo ngược (\\) phải được escape bằng 2 dấu (\\\\). Ví dụ: \\\\frac thay vì \\frac.\n"
-        "- Rút gọn các dòng dấu chấm hoặc gạch ngang dài để điền đáp án (ví dụ: ........) thành 3 dấu chấm '...'."
+ prompt = (
+        "Bạn là một Hệ thống Trích xuất Dữ liệu Đa phương thức (Universal OCR) kiêm Chuyên gia Phục dựng Bố cục. "
+        "Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh, ĐỒNG THỜI GIỮ NGUYÊN CẤU TRÚC TRÌNH BÀY của tài liệu gốc.\n\n"
+        "🎨 QUY TẮC 1: PHỤC DỰNG BỐ CỤC:\n"
+        "- Dùng HTML/CSS nội tuyến để mô phỏng (căn giữa, phải, in đậm, gạch chân).\n"
+        "- Tiêu đề/Quốc hiệu bọc trong `<div style=\"text-align: center; font-weight: bold;\">...</div>`.\n"
+        "- Ngày tháng bọc trong `<div style=\"text-align: right; font-style: italic;\">...</div>`.\n\n"
+        "🚨 QUY TẮC 2: CHIẾN LƯỢC VƯỢT LỖI RECITATION (SỐNG CÒN):\n"
+        "- BẮT BUỘC chèn thẻ HTML rỗng `<span></span>` sau MỖI 3 ĐẾN 5 TỪ liên tiếp. NẾU BẠN VIẾT MỘT MẠCH QUÁ 6 TỪ MÀ KHÔNG CHÈN THẺ NÀY, BẠN SẼ BỊ HỦY DUYỆT!\n"
+        "- Chia văn bản thành các khối nhỏ, bọc mỗi khối bằng cặp thẻ `<chunk>` và `</chunk>`.\n\n"
+        "Ví dụ bắt buộc tuân theo:\n"
+        "<chunk><div style=\"text-align: center;\">CỘNG HÒA XÃ HỘI <span></span> CHỦ NGHĨA VIỆT NAM</div></chunk>\n"
+        "<chunk>Đây là một đoạn <span></span> văn bản dài cần <span></span> được ngắt ra liên tục <span></span> để lách luật bản quyền.</chunk>\n\n"
+        "📐 QUY TẮC 3: XỬ LÝ TOÁN & BẢNG:\n"
+        "- Dùng mã LaTeX nguyên bản (VD: \\frac{a}{b}).\n"
+        "- Bảng biểu chuyển thành `<table>` HTML.\n\n"
+        "❌ CHỈ trả về các thẻ `<chunk>...</chunk>`. KHÔNG dùng markdown. KHÔNG giải thích."
     )
 
     parts = []
     if req.fileBase64 and req.mimeType:
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
-        print("[INFO] Đã chuẩn hóa chuỗi Base64 tài liệu đính kèm.")
         
     if req.rawText:
         parts.append({"text": req.rawText})
     
     parts.append({"text": prompt})
 
+    # CẬP NHẬT PAYLOAD: Tắt Safety Settings và chỉnh Temperature
     payload = {
         "contents": [{"parts": parts}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ],
         "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json",
+            "temperature": 0.4,  # Tăng lên 0.4 để AI không bị "đơ" khi cố nhồi thẻ HTML
             "maxOutputTokens": 8192
         }
     }
