@@ -21,15 +21,13 @@ app = FastAPI(title="SaaS OCR Reader Backend")
 
 # ==========================================
 # CẤU HÌNH QUAN TRỌNG: CORS MIDDLEWARE
-# Vì giao diện HTML chạy độc lập (Local hoặc Host khác như Vercel/Netlify),
-# Backend trên Render bắt buộc phải cho phép Cross-Origin để không bị chặn kết nối.
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép tất cả các Origin truy cập. Bạn có thể thay đổi thành domain cụ thể nếu muốn bảo mật hơn.
+    allow_origins=["*"], 
     allow_credentials=True,
-    allow_methods=["*"],  # Cho phép mọi phương thức (GET, POST, OPTIONS,...)
-    allow_headers=["*"],  # Cho phép mọi Headers gửi lên
+    allow_methods=["*"], 
+    allow_headers=["*"], 
 )
 
 # Tạo thư mục static dự phòng nếu chạy chế độ monolithic
@@ -73,28 +71,35 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # BẢN VÁ PROMPT TỐI ƯU: Ép AI chia nhỏ câu để chống lỗi Recitation (Bản quyền văn bản dài của Google)
-PROMPT_TEXT = r"""
-       Bạn là một Hệ thống Trích xuất Dữ liệu Đa phương thức (Universal OCR) kiêm Chuyên gia Phục dựng Bố cục. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh, ĐỒNG THỜI GIỮ NGUYÊN CẤU TRÚC TRÌNH BÀY của tài liệu gốc.
+    # BẢN VÁ PROMPT TỐI ƯU: Xuất JSON chuẩn cho Frontend, tự động áp dụng CSS làm đẹp bố cục
+    PROMPT_TEXT = r"""
+Bạn là Hệ thống Universal OCR kiêm Chuyên gia Phục dựng Bố cục. Nhiệm vụ của bạn là số hóa nội dung, GIỮ NGUYÊN BỐ CỤC, xuất ra định dạng JSON MẢNG (Array).
 
-🎨 QUY TẮC 1: PHỤC DỰNG BỐ CỤC:
-- Dùng HTML/CSS nội tuyến để mô phỏng (căn giữa, phải, in đậm, gạch chân).
-- Tiêu đề/Quốc hiệu bọc trong `<div style="text-align: center; font-weight: bold;">...</div>`.
-- Ngày tháng bọc trong `<div style="text-align: right; font-style: italic;">...</div>`.
+🎨 QUY TẮC 1: PHỤC DỰNG BỐ CỤC ĐẸP MẮT (Cho mục `visual`):
+- Hãy chia văn bản thành các đối tượng JSON theo từng đoạn văn/khối để giao diện hiển thị thoáng đãng.
+- Tiêu đề/Quốc hiệu: Bọc trong `<div style="text-align: center; font-size: 1.15em; font-weight: bold; color: #FF7A00; margin-bottom: 12px;">...</div>`.
+- Ngày tháng: Bọc trong `<div style="text-align: right; font-style: italic; color: #8B8D91; margin-bottom: 10px;">...</div>`.
+- Đoạn văn bình thường: Bọc trong `<div style="margin-bottom: 10px; line-height: 1.7; text-align: justify;">...</div>`.
+- Bảng biểu: Bọc trong `<div style="overflow-x: auto; margin: 15px 0;"><table style="width: 100%; border-collapse: collapse; border: 1px solid rgba(255,122,0,0.3);">...</table></div>`. Các thẻ `<th>`, `<td>` cần thêm thuộc tính CSS `border: 1px solid rgba(255,122,0,0.3); padding: 8px;`.
 
-🚨 QUY TẮC 2: CHIẾN LƯỢC VƯỢT LỖI RECITATION (SỐNG CÒN):
-- BẮT BUỘC chèn thẻ HTML rỗng `<span></span>` sau MỖI 3 ĐẾN 5 TỪ liên tiếp đối với VĂN BẢN THƯỜNG. NẾU BẠN VIẾT MỘT MẠCH QUÁ 6 TỪ MÀ KHÔNG CHÈN THẺ NÀY, BẠN SẼ BỊ HỦY DUYỆT!
-- TUYỆT ĐỐI KHÔNG chèn thẻ `<span></span>` vào bên trong các khối mã LaTeX hoặc bên trong các thẻ HTML cấu trúc.
-- Chia văn bản thành các khối nhỏ, bọc mỗi khối bằng cặp thẻ `<chunk>` và `</chunk>`.
+🚨 QUY TẮC 2: CHIẾN LƯỢC VƯỢT LỖI RECITATION:
+- BẮT BUỘC chèn thẻ HTML rỗng `<span></span>` sau MỖI 3 ĐẾN 5 TỪ liên tiếp TRONG VĂN BẢN THƯỜNG. 
+- KHÔNG chèn thẻ `<span></span>` vào mã Toán LaTeX, HTML cấu trúc, hay mục `spoken`.
 
-📐 QUY TẮC 3: XỬ LÝ TOÁN & BẢNG:
-- Cấu trúc bảng biểu chuyển thành `<table>` HTML.
-- Mọi công thức, biểu thức toán học, hóa học BẮT BUỘC dùng mã LaTeX.
-- BẮT BUỘC bọc mã LaTeX trong dấu `$` (nếu công thức nằm cùng dòng văn bản) hoặc bọc trong dấu `$$` (nếu công thức đứng thành dòng riêng). 
-- Ví dụ đúng: `$\frac{a}{b}$` hoặc `$$x^2 + y^2 = z^2$$`.
+📐 QUY TẮC 3: XỬ LÝ TOÁN HỌC:
+- Mọi công thức/biểu thức toán học bắt buộc phải dùng mã LaTeX nguyên bản.
+- Công thức cùng dòng: Bọc trong ký hiệu `$ ... $`.
+- Công thức đứng thành dòng độc lập: Bọc trong `<div style="text-align: center; padding: 12px 0; overflow-x: auto; font-size: 1.1em; color: #FFF;">$$...$$</div>`.
 
-❌ CHỈ trả về các thẻ `<chunk>...</chunk>`. KHÔNG dùng markdown. KHÔNG giải thích.
-    """
+❌ QUY TẮC 4: ĐỊNH DẠNG ĐẦU RA BẮT BUỘC (JSON ARRAY):
+Chỉ trả về MỘT MẢNG JSON HỢP LỆ (KHÔNG bọc trong markdown ```json). Cấu trúc:
+[
+  {
+    "visual": "Mã HTML/CSS phục dựng kèm <span></span> và $ / $$ LaTeX",
+    "spoken": "Văn bản thuần túy để đọc thành tiếng (Không chứa HTML hay LaTeX)"
+  }
+]
+"""
 
     parts = []
     if req.fileBase64 and req.mimeType:
@@ -104,9 +109,9 @@ PROMPT_TEXT = r"""
     if req.rawText:
         parts.append({"text": req.rawText})
     
-    parts.append({"text": prompt})
+    # SỬA LỖI: Truyền đúng biến PROMPT_TEXT thay vì prompt
+    parts.append({"text": PROMPT_TEXT})
 
-    # CẬP NHẬT PAYLOAD: Tắt Safety Settings và chỉnh Temperature
     payload = {
         "contents": [{"parts": parts}],
         "safetySettings": [
@@ -116,7 +121,7 @@ PROMPT_TEXT = r"""
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.4,  # Tăng lên 0.4 để AI không bị "đơ" khi cố nhồi thẻ HTML
+            "temperature": 0.4, 
             "maxOutputTokens": 8192
         }
     }
@@ -170,11 +175,11 @@ PROMPT_TEXT = r"""
             return JSONResponse(status_code=500, content={"error": f"Lỗi xử lý hệ thống nội bộ: {str(e)}"})
 
 # ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU VỚI CORS)
+# 2. API PROXY GOOGLE TTS
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
+    target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){lang}&q={text}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
@@ -186,7 +191,7 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
 # ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT (TẢI TRỌN BỘ OFFLINE)
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -202,7 +207,7 @@ async def bulk_tts(req: BulkTTSRequest):
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+            target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){req.lang}&q={text}"
             try:
                 resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
