@@ -20,17 +20,16 @@ except ImportError:
 app = FastAPI(title="SaaS OCR Reader Backend")
 
 # ==========================================
-# CẤU HÌNH CORS MIDDLEWARE (Quan trọng để Frontend gọi vào Render)
+# CẤU HÌNH CORS MIDDLEWARE
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép tất cả các nguồn (bao gồm cả file HTML local) truy cập
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Tạo thư mục static nếu chưa tồn tại để tránh lỗi mount
 if not os.path.exists("static"):
     os.makedirs("static")
 
@@ -40,7 +39,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy ổn định!",
+        "message": "Backend OCR Reader đang chạy ổn định!",
         "endpoints": {
             "OCR & Extract": "/api/extract [POST]",
             "TTS Stream": "/api/tts [GET]",
@@ -71,7 +70,6 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT ĐÃ ĐƯỢC TỐI ƯU
     PROMPT_TEXT = """
 Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp thành cấu trúc dữ liệu được yêu cầu.
 
@@ -143,7 +141,6 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # 1. Bóc tách dấu bọc markdown nếu có
             if raw_result.startswith("```json"):
                 raw_result = raw_result[7:]
             elif raw_result.startswith("```"):
@@ -152,17 +149,14 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
                 raw_result = raw_result[:-3]
             raw_result = raw_result.strip()
             
-            # 2. VÁ LỖI TỰ ĐỘNG: Xóa bỏ tất cả các dấu phẩy thừa (trailing comma) phá hoại cấu trúc JSON
             raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
             
             try:
-                # Parse mảng JSON
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
                 return {"result": parsed_json} 
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng chi tiết: {e}")
-                print(f"[DEBUG LOG] Chuỗi RAW gây lỗi từ AI:\n{raw_result}\n[END DEBUG LOG]")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "details": str(e), "raw": raw_result})
             
         except httpx.ReadTimeout:
@@ -176,12 +170,19 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){lang}&q={text}"
+    # FIX LỖI: Sử dụng dictionary params để httpx tự động mã hóa URL an toàn
+    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
+    params = {
+        "client": "gtx",
+        "ie": "UTF-8",
+        "tl": lang,
+        "q": text
+    }
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
         async with httpx.AsyncClient(trust_env=False) as client:
-            async with client.stream("GET", target_url, headers=headers) as r:
+            async with client.stream("GET", target_url, params=params, headers=headers) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
 
@@ -199,16 +200,27 @@ async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
+    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
     
     async with httpx.AsyncClient(trust_env=False) as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){req.lang}&q={text}"
+            
+            # FIX LỖI: Truyền parameters đúng chuẩn
+            params = {
+                "client": "gtx",
+                "ie": "UTF-8",
+                "tl": req.lang,
+                "q": text
+            }
+            
             try:
-                resp = await client.get(target_url, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
+                else:
+                    print(f"[WARNING] API TTS trả về mã lỗi: {resp.status_code}")
             except Exception as e:
                 print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
                 
