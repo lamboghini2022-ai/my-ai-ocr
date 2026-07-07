@@ -71,34 +71,21 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT ĐƯỢC THIẾT KẾ ĐẶC BIỆT
-    PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp, sau đó BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT.
-
-Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
-[
-  {
-    "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
-    "spoken": "Đề kiểm tra môn Vật Lý. Câu một: Tính vận tốc..."
-  }
-]
+    # PROMPT ĐÃ ĐƯỢC TỐI ƯU: Loại bỏ các quy tắc ép cấu trúc JSON thủ công để không làm xung đột hệ thống
+    PROMPT_TEXT = """
+Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp thành cấu trúc dữ liệu được yêu cầu.
 
 📐 QUY TẮC CHO TRƯỜNG "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- TUYỆT ĐỐI KHÔNG DÙNG THẺ HTML. Hãy dùng ký tự ngắt dòng `\n\n` (viết liền dạng chữ, không bấm phím Enter xuống dòng thực tế) để chia các phân đoạn văn bản.
+- TUYỆT ĐỐI KHÔNG DÙNG THẺ HTML. Hãy xuống dòng bình thường để chia các phân đoạn văn bản.
 - Mọi công thức Toán học, Vật Lý, Hóa học phức tạp BẮT BUỘC phải chuyển đổi thành mã LaTeX chuẩn.
-- Công thức nằm cùng dòng văn bản (Inline): Bọc bằng ký tự `$`. Ví dụ: `$v = s/t$`
-- Công thức đứng riêng một dòng (Block): Bọc bằng ký tự `$$`. Ví dụ: `$$F = m \cdot a$$`
+- Công thức nằm cùng dòng văn bản (Inline): Bọc bằng ký tự `$`. Ví dụ: $v = s/t$
+- Công thức đứng riêng một dòng (Block): Bọc bằng ký tự `$$`. Ví dụ: $$F = m \\cdot a$$
 
 🚨 QUY TẮC CHO TRƯỜNG "spoken" (DÙNG ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Hãy chia nhỏ nội dung bài học thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa tối đa 1-2 câu ngắn (khoảng 15 đến 30 từ) để tránh máy đọc bị ngắt quãng hoặc hụt hơi.
-- TUYỆT ĐỐI KHÔNG chứa mã LaTeX hoặc ký tự đặc biệt của Toán học. Phải dịch toàn bộ các công thức thành ngôn ngữ nói tiếng Việt tự nhiên (Ví dụ: dịch "H2O" thành "H hai O", dịch "x^2 + y^2" thành "x bình phương cộng y bình phương", dịch "\sqrt{x}" thành "căn bậc hai của x").
+- Hãy chia nhỏ nội dung bài học thành các câu ngắn. Mỗi phần tử chỉ nên chứa tối đa 1-2 câu ngắn (khoảng 15 đến 30 từ) để tránh máy đọc bị ngắt quãng hoặc hụt hơi.
+- TUYỆT ĐỐI KHÔNG chứa mã LaTeX hoặc ký tự đặc biệt của Toán học. Phải dịch toàn bộ các công thức thành ngôn ngữ nói tiếng Việt tự nhiên (Ví dụ: dịch "H2O" thành "H hai O", dịch "x^2 + y^2" thành "x bình phương cộng y bình phương", dịch "\\sqrt{x}" thành "căn bậc hai của x").
 - Chỉ chứa chữ cái tiếng Việt có dấu, số đếm thông thường và các dấu câu cơ bản (, . ! ?).
-
-⚠️ QUY TẮC AN TOÀN JSON TỐI CAO ĐỂ TRÁNH LỖI PHÂN TÍCH (JSON DECODE ERROR):
-1. TUYỆT ĐỐI KHÔNG SỬ DỤNG HÀNH VI BẤM XUỐNG DÒNG THỰC TẾ (literal newline) bên trong chuỗi giá trị JSON. Tất cả các dấu xuống dòng của công thức ma trận, hệ phương trình hay phân đoạn văn bản bắt buộc phải được viết dưới dạng chuỗi ký tự thoát là `\n`.
-2. BẮT BUỘC PHẢI NHÂN ĐÔI DẤU GẠCH CHÉO NGƯỢC (thành `\\`) cho TOÀN BỘ các lệnh điều khiển LaTeX (Ví dụ: viết là `\\frac{a}{b}`, `\\begin{cases}`, `\\Delta`, `\\rightarrow`). Nếu thiếu dấu gạch chéo kép, chuỗi JSON sẽ bị hỏng hoàn toàn.
-3. Bất kỳ ký tự ngoặc kép (") nào xuất hiện bên trong nội dung văn bản hoặc mã LaTeX bắt buộc phải được đổi thành dấu ngoặc đơn (') để tránh xung đột làm đóng chuỗi JSON sớm.
-    """
+"""
 
     parts = []
     if req.fileBase64 and req.mimeType:
@@ -136,7 +123,6 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
         }
     }
 
-    # FIX LỖI: Thêm trust_env=False để bỏ qua Proxy/VPN của máy tính
     async with httpx.AsyncClient(trust_env=False) as client:
         try:
             print("[INFO] Đang gửi yêu cầu và đợi Google Gemini API xử lý...")
@@ -157,15 +143,23 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            raw_result = re.sub(r"^```json\n?|```$", "", raw_result, flags=re.MULTILINE).strip()
+            # FIX LỖI REGEX: Bóc tách cặp dấu ```json ... ``` một cách an toàn, không dùng Regex cắt lung tung nữa
+            if raw_result.startswith("```json"):
+                raw_result = raw_result[7:]
+            elif raw_result.startswith("```"):
+                raw_result = raw_result[3:]
+            if raw_result.endswith("```"):
+                raw_result = raw_result[:-3]
+            raw_result = raw_result.strip()
             
             try:
+                # Parse mảng JSON trả về từ AI công thêm chế độ strict=False để bỏ qua ký tự điều khiển lạ
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
                 return {"result": parsed_json} 
             except json.JSONDecodeError as e:
-                print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
-                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
+                print(f"[CRITICAL ERROR] JSON lỗi định dạng chi tiết: {e}")
+                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "details": str(e), "raw": raw_result})
             
         except httpx.ReadTimeout:
             print("[TIMEOUT] Quá thời gian 60 giây.")
@@ -178,11 +172,10 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
+    target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){lang}&q={text}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
-        # FIX LỖI: Thêm trust_env=False
         async with httpx.AsyncClient(trust_env=False) as client:
             async with client.stream("GET", target_url, headers=headers) as r:
                 async for chunk in r.aiter_bytes():
@@ -203,12 +196,11 @@ async def bulk_tts(req: BulkTTSRequest):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
     
-    # FIX LỖI: Thêm trust_env=False
     async with httpx.AsyncClient(trust_env=False) as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+            target_url = f"[https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=](https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=){req.lang}&q={text}"
             try:
                 resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
