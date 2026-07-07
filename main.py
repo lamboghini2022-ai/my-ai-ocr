@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-# Thử tải biến môi trường từ file .env nếu chạy local
+# Thử tải biến môi trường từ file .env nếu chạy ở môi trường local
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -20,16 +20,17 @@ except ImportError:
 app = FastAPI(title="SaaS OCR Reader Backend")
 
 # ==========================================
-# CẤU HÌNH CORS MIDDLEWARE (Quan trọng cho Render)
+# CẤU HÌNH CORS MIDDLEWARE (Quan trọng để Frontend gọi vào Render)
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép HTML local truy cập vào Render
+    allow_origins=["*"],  # Cho phép tất cả các nguồn (bao gồm cả file HTML local) truy cập
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Tạo thư mục static nếu chưa tồn tại để tránh lỗi mount
 if not os.path.exists("static"):
     os.makedirs("static")
 
@@ -39,7 +40,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy!",
+        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy ổn định!",
         "endpoints": {
             "OCR & Extract": "/api/extract [POST]",
             "TTS Stream": "/api/tts [GET]",
@@ -53,31 +54,28 @@ class ExtractRequest(BaseModel):
     rawText: Optional[str] = None
 
 # ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
-# ==========================================
-# ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
+# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI 
 # ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR ==========")
+    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR LỚN ==========")
     
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
+        print("[LỖI] Hệ thống thiếu biến môi trường GEMINI_API_KEY")
         return JSONResponse(
             status_code=500, 
-            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
+            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên hệ thống server Render."}
         )
 
     model_name = "gemini-2.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_name}:generateContent?key={api_key}"
 
-    # PROMPT ĐÃ ĐƯỢC CẬP NHẬT: Bổ sung rào chắn chống lỗi JSON và LaTeX
+    # PROMPT ĐƯỢC THIẾT KẾ ĐẶC BIỆT
     PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
+Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp, sau đó BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT.
 
-Cấu trúc JSON bắt buộc:
+Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
 [
   {
     "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
@@ -85,24 +83,26 @@ Cấu trúc JSON bắt buộc:
   }
 ]
 
-📐 QUY TẮC CHO "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- KHÔNG DÙNG THẺ HTML. Hãy dùng ký tự ngắt dòng `\n\n` (viết liền dạng chữ, không bấm Enter xuống dòng thật) để chia đoạn.
-- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
-- Công thức trong dòng (Inline): Bọc bằng `$`. Ví dụ: `$v = s/t$`
-- Công thức đứng riêng (Block): Bọc bằng `$$`. Ví dụ: `$$F = m \cdot a$$`
+📐 QUY TẮC CHO TRƯỜNG "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
+- TUYỆT ĐỐI KHÔNG DÙNG THẺ HTML. Hãy dùng ký tự ngắt dòng `\n\n` (viết liền dạng chữ, không bấm phím Enter xuống dòng thực tế) để chia các phân đoạn văn bản.
+- Mọi công thức Toán học, Vật Lý, Hóa học phức tạp BẮT BUỘC phải chuyển đổi thành mã LaTeX chuẩn.
+- Công thức nằm cùng dòng văn bản (Inline): Bọc bằng ký tự `$`. Ví dụ: `$v = s/t$`
+- Công thức đứng riêng một dòng (Block): Bọc bằng ký tự `$$`. Ví dụ: `$$F = m \cdot a$$`
 
-🚨 QUY TẮC CHO "spoken" (ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Chia nội dung thành các câu ngắn. Không chứa mã LaTeX, dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "căn bậc hai của x").
-- Chỉ chứa chữ cái, số và dấu câu cơ bản (, . ! ?).
+🚨 QUY TẮC CHO TRƯỜNG "spoken" (DÙNG ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
+- Hãy chia nhỏ nội dung bài học thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa tối đa 1-2 câu ngắn (khoảng 15 đến 30 từ) để tránh máy đọc bị ngắt quãng hoặc hụt hơi.
+- TUYỆT ĐỐI KHÔNG chứa mã LaTeX hoặc ký tự đặc biệt của Toán học. Phải dịch toàn bộ các công thức thành ngôn ngữ nói tiếng Việt tự nhiên (Ví dụ: dịch "H2O" thành "H hai O", dịch "x^2 + y^2" thành "x bình phương cộng y bình phương", dịch "\sqrt{x}" thành "căn bậc hai của x").
+- Chỉ chứa chữ cái tiếng Việt có dấu, số đếm thông thường và các dấu câu cơ bản (, . ! ?).
 
-⚠️ QUY TẮC SINH JSON TỐI QUAN TRỌNG (TRÁNH LỖI PHÂN TÍCH):
-1. KHÔNG SỬ DỤNG NGẮT DÒNG THỰC TẾ (literal newline) BÊN TRONG CHUỖI. Bất kỳ sự ngắt dòng nào trong ma trận, hệ phương trình hay đoạn văn đều phải viết bằng chữ `\n`.
-2. BẮT BUỘC NHÂN ĐÔI DẤU GẠCH CHÉO NGƯỢC (\\) cho TOÀN BỘ lệnh LaTeX (Ví dụ: `\\frac{a}{b}`, `\\begin{cases} ... \\end{cases}`).
-3. Ký tự ngoặc kép (") bên trong văn bản hoặc LaTeX phải được đổi thành ngoặc đơn (') để không làm vỡ cấu trúc JSON.
+⚠️ QUY TẮC AN TOÀN JSON TỐI CAO ĐỂ TRÁNH LỖI PHÂN TÍCH (JSON DECODE ERROR):
+1. TUYỆT ĐỐI KHÔNG SỬ DỤNG HÀNH VI BẤM XUỐNG DÒNG THỰC TẾ (literal newline) bên trong chuỗi giá trị JSON. Tất cả các dấu xuống dòng của công thức ma trận, hệ phương trình hay phân đoạn văn bản bắt buộc phải được viết dưới dạng chuỗi ký tự thoát là `\n`.
+2. BẮT BUỘC PHẢI NHÂN ĐÔI DẤU GẠCH CHÉO NGƯỢC (thành `\\`) cho TOÀN BỘ các lệnh điều khiển LaTeX (Ví dụ: viết là `\\frac{a}{b}`, `\\begin{cases}`, `\\Delta`, `\\rightarrow`). Nếu thiếu dấu gạch chéo kép, chuỗi JSON sẽ bị hỏng hoàn toàn.
+3. Bất kỳ ký tự ngoặc kép (") nào xuất hiện bên trong nội dung văn bản hoặc mã LaTeX bắt buộc phải được đổi thành dấu ngoặc đơn (') để tránh xung đột làm đóng chuỗi JSON sớm.
     """
 
     parts = []
     if req.fileBase64 and req.mimeType:
+        # Làm sạch chuỗi Base64 loại bỏ phần header của data-uri nếu frontend gửi lên thừa
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
         
@@ -111,7 +111,7 @@ Cấu trúc JSON bắt buộc:
     
     parts.append({"text": PROMPT_TEXT})
 
-    # CẬP NHẬT: Thêm responseSchema để ép Gemini trả về đúng cấu trúc, tránh 99% lỗi JSON
+    # SỬ DỤNG STRUCTURED OUTPUTS (responseSchema)
     payload = {
         "contents": [{"parts": parts}],
         "safetySettings": [
@@ -121,7 +121,7 @@ Cấu trúc JSON bắt buộc:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.1, # Giảm xuống 0.1 để AI bám sát quy tắc JSON, bớt "bay bổng"
+            "temperature": 0.1,  
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
             "responseSchema": {
@@ -140,27 +140,26 @@ Cấu trúc JSON bắt buộc:
 
     async with httpx.AsyncClient() as client:
         try:
-            print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
+            print("[INFO] Đang gửi yêu cầu và đợi Google Gemini API xử lý...")
             response = await client.post(url, json=payload, timeout=60.0)
             
             if response.status_code != 200:
-                print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code}")
-                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini: {response.text}"})
+                print(f"[API ERROR] Google API trả về mã lỗi HTTP: {response.status_code}")
+                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi từ phía Gemini: {response.text}"})
             
             data = response.json()
             candidates = data.get("candidates", [])
             if not candidates:
-                return JSONResponse(status_code=400, content={"error": "Bị chặn bởi chính sách an toàn đầu vào."})
+                return JSONResponse(status_code=400, content={"error": "Yêu cầu bị chặn bởi bộ lọc an toàn đầu vào của Google."})
                 
             candidate = candidates[0]
             if "content" not in candidate:
-                return JSONResponse(status_code=400, content={"error": "AI vi phạm bộ lọc đầu ra."})
+                return JSONResponse(status_code=400, content={"error": "Nội dung phản hồi bị vi phạm bộ lọc đầu ra của AI."})
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # CẬP NHẬT: Làm sạch chuỗi trước khi phân tích (Xóa markdown code block nếu có lọt vào)
-            raw_result = re.sub(r"^
-http://googleusercontent.com/immersive_entry_chip/0
+            # ĐÃ FIX: Tiền xử lý dọn dẹp chuỗi xóa block markdown ```json nếu có
+            raw_result = re.sub(r"^```json\n?|```$", "", raw_result, flags=re.MULTILINE).strip()
             
             try:
                 # Parse mảng JSON trả về từ AI
