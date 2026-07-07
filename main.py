@@ -55,6 +55,9 @@ class ExtractRequest(BaseModel):
 # ==========================================
 # 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
 # ==========================================
+# ==========================================
+# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
+# ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
     print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR ==========")
@@ -70,7 +73,7 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT MỚI: Đồng bộ 100% với Frontend (Yêu cầu trả về mảng Object visual/spoken)
+    # PROMPT ĐÃ ĐƯỢC CẬP NHẬT: Bổ sung rào chắn chống lỗi JSON và LaTeX
     PROMPT_TEXT = r"""
 Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
 
@@ -83,16 +86,19 @@ Cấu trúc JSON bắt buộc:
 ]
 
 📐 QUY TẮC CHO "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- KHÔNG DÙNG THẺ HTML (vì Frontend dùng textContent). Hãy dùng ký tự ngắt dòng `\n\n` để chia đoạn, tạo khoảng trắng giúp giao diện dễ nhìn.
+- KHÔNG DÙNG THẺ HTML. Hãy dùng ký tự ngắt dòng `\n\n` (viết liền dạng chữ, không bấm Enter xuống dòng thật) để chia đoạn.
 - Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
 - Công thức trong dòng (Inline): Bọc bằng `$`. Ví dụ: `$v = s/t$`
 - Công thức đứng riêng (Block): Bọc bằng `$$`. Ví dụ: `$$F = m \cdot a$$`
-- LƯU Ý JSON: Phải nhân đôi dấu gạch chéo ngược cho lệnh LaTeX để không làm hỏng cú pháp JSON (Ví dụ: `\\frac{a}{b}`, `\\sqrt{x}`, `\\Delta`).
 
 🚨 QUY TẮC CHO "spoken" (ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Chia nội dung thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa 1-2 câu (khoảng 15-30 từ) để máy đọc không bị ngắt quãng.
-- KHÔNG chứa mã LaTeX. Phải dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "x bình phương cộng y bình phương", "căn bậc hai của x").
+- Chia nội dung thành các câu ngắn. Không chứa mã LaTeX, dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "căn bậc hai của x").
 - Chỉ chứa chữ cái, số và dấu câu cơ bản (, . ! ?).
+
+⚠️ QUY TẮC SINH JSON TỐI QUAN TRỌNG (TRÁNH LỖI PHÂN TÍCH):
+1. KHÔNG SỬ DỤNG NGẮT DÒNG THỰC TẾ (literal newline) BÊN TRONG CHUỖI. Bất kỳ sự ngắt dòng nào trong ma trận, hệ phương trình hay đoạn văn đều phải viết bằng chữ `\n`.
+2. BẮT BUỘC NHÂN ĐÔI DẤU GẠCH CHÉO NGƯỢC (\\) cho TOÀN BỘ lệnh LaTeX (Ví dụ: `\\frac{a}{b}`, `\\begin{cases} ... \\end{cases}`).
+3. Ký tự ngoặc kép (") bên trong văn bản hoặc LaTeX phải được đổi thành ngoặc đơn (') để không làm vỡ cấu trúc JSON.
     """
 
     parts = []
@@ -105,6 +111,7 @@ Cấu trúc JSON bắt buộc:
     
     parts.append({"text": PROMPT_TEXT})
 
+    # CẬP NHẬT: Thêm responseSchema để ép Gemini trả về đúng cấu trúc, tránh 99% lỗi JSON
     payload = {
         "contents": [{"parts": parts}],
         "safetySettings": [
@@ -114,9 +121,20 @@ Cấu trúc JSON bắt buộc:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.2, 
+            "temperature": 0.1, # Giảm xuống 0.1 để AI bám sát quy tắc JSON, bớt "bay bổng"
             "maxOutputTokens": 8192,
-            "responseMimeType": "application/json" # Ép Google Gemini trả về chuẩn JSON
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "visual": {"type": "STRING"},
+                        "spoken": {"type": "STRING"}
+                    },
+                    "required": ["visual", "spoken"]
+                }
+            }
         }
     }
 
@@ -139,6 +157,10 @@ Cấu trúc JSON bắt buộc:
                 return JSONResponse(status_code=400, content={"error": "AI vi phạm bộ lọc đầu ra."})
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
+            
+            # CẬP NHẬT: Làm sạch chuỗi trước khi phân tích (Xóa markdown code block nếu có lọt vào)
+            raw_result = re.sub(r"^
+http://googleusercontent.com/immersive_entry_chip/0
             
             try:
                 # Parse mảng JSON trả về từ AI
