@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 # Thử tải biến môi trường từ file .env nếu chạy local
 try:
@@ -20,11 +20,11 @@ except ImportError:
 app = FastAPI(title="SaaS OCR Reader Backend")
 
 # ==========================================
-# CẤU HÌNH CORS MIDDLEWARE (Quan trọng cho Render)
+# CẤU HÌNH CORS MIDDLEWARE
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép HTML local truy cập vào Render
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,7 +39,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy!",
+        "message": "Backend OCR Reader đang chạy!",
         "endpoints": {
             "OCR & Extract": "/api/extract [POST]",
             "TTS Stream": "/api/tts [GET]",
@@ -47,13 +47,23 @@ async def root_endpoint():
         }
     })
 
+# Tạo model dữ liệu cho 1 ảnh
+class ImageData(BaseModel):
+    fileBase64: str
+    mimeType: str
+
+# Cập nhật Model để nhận 1 mảng gồm nhiều ảnh (tối đa 5)
 class ExtractRequest(BaseModel):
+    images: Optional[List[ImageData]] = None  # Cấu trúc mới hỗ trợ 5 ảnh
+    
+    # Vẫn giữ lại cấu trúc cũ để lỡ Frontend chưa kịp cập nhật thì code không bị sập
     fileBase64: Optional[str] = None
     mimeType: Optional[str] = None
+    
     rawText: Optional[str] = None
 
 # ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
+# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI (TỐI ĐA 5 ẢNH)
 # ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
@@ -64,44 +74,61 @@ async def extract_text(req: ExtractRequest):
         print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
         return JSONResponse(
             status_code=500, 
-            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
+            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY."}
         )
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
+    # PROMPT MỚI: Ép AI giữ nguyên bố cục không gian, khoảng trắng để tạo cảm giác căn lề
     PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
+Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ các bức ảnh được cung cấp và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
 
 Cấu trúc JSON bắt buộc:
 [
   {
-    "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
-    "spoken": "Đề kiểm tra môn Vật Lý. Câu một: Tính vận tốc..."
+    "visual": "    CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\n          Độc lập - Tự do - Hạnh phúc\n\n          HỢP ĐỒNG MUA BÁN CĂN HỘ...",
+    "spoken": "Cộng hòa xã hội chủ nghĩa Việt Nam. Độc lập Tự do Hạnh phúc. Hợp đồng mua bán căn hộ..."
   }
 ]
 
-📐 QUY TẮC CHO "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- KHÔNG DÙNG THẺ HTML (vì Frontend dùng textContent). Hãy dùng ký tự ngắt dòng `\n\n` để chia đoạn, tạo khoảng trắng giúp giao diện dễ nhìn.
-- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
-- Công thức trong dòng (Inline): Bọc bằng `$`. Ví dụ: `$v = s/t$`
-- Công thức đứng riêng (Block): Bọc bằng `$$`. Ví dụ: `$$F = m \cdot a$$`
-- LƯU Ý JSON: Phải nhân đôi dấu gạch chéo ngược cho lệnh LaTeX để không làm hỏng cú pháp JSON (Ví dụ: `\\frac{a}{b}`, `\\sqrt{x}`, `\\Delta`).
+📐 QUY TẮC SỐNG CÒN CHO "visual" (ĐỂ BẢO TOÀN BỐ CỤC ĐẸP MẮT):
+1. BẢO TOÀN KHOẢNG TRẮNG: Bạn PHẢI sử dụng các khoảng trắng (space) để đẩy các Tiêu đề (như HỢP ĐỒNG, CỘNG HÒA XÃ HỘI...) ra giữa dòng, giống hệt như cách chúng được căn giữa trong bản gốc.
+2. BẢO TOÀN NGẮT DÒNG: Dùng `\n` hoặc `\n\n` chính xác theo từng đoạn, từng mục của văn bản, hợp đồng. Không được tự ý nối các dòng của hợp đồng lại với nhau.
+3. KHÔNG DÙNG THẺ HTML. Chỉ dùng text thô kết hợp khoảng trắng và ngắt dòng.
+4. Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX (Ví dụ: `$v = s/t$`). Phải nhân đôi dấu gạch chéo ngược (`\\frac{a}{b}`).
 
 🚨 QUY TẮC CHO "spoken" (ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Chia nội dung thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa 1-2 câu (khoảng 15-30 từ) để máy đọc không bị ngắt quãng.
-- KHÔNG chứa mã LaTeX. Phải dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "x bình phương cộng y bình phương", "căn bậc hai của x").
-- Chỉ chứa chữ cái, số và dấu câu cơ bản (, . ! ?).
+- Dịch hoàn toàn sang text thuần túy để máy đọc. Chia câu ngắn.
+- KHÔNG chứa mã LaTeX.
     """
 
     parts = []
-    if req.fileBase64 and req.mimeType:
+    
+    # XỬ LÝ NHIỀU ẢNH (TỐI ĐA 5)
+    image_count = 0
+    if req.images and len(req.images) > 0:
+        if len(req.images) > 5:
+            return JSONResponse(status_code=400, content={"error": "Chỉ hỗ trợ xử lý tối đa 5 ảnh trong một lần."})
+        
+        for img in req.images:
+            clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', img.fileBase64)
+            parts.append({"inlineData": {"mimeType": img.mimeType, "data": clean_b64}})
+            image_count += 1
+            
+    # HỖ TRỢ NGƯỢC CODE CŨ (Nếu Frontend gửi lên 1 ảnh theo cách cũ)
+    elif req.fileBase64 and req.mimeType:
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
+        image_count = 1
         
     if req.rawText:
         parts.append({"text": req.rawText})
     
+    if image_count == 0 and not req.rawText:
+         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu ảnh hoặc văn bản nào được gửi lên."})
+         
+    print(f"[INFO] Đã tiếp nhận {image_count} ảnh để xử lý.")
     parts.append({"text": PROMPT_TEXT})
 
     payload = {
@@ -113,7 +140,7 @@ Cấu trúc JSON bắt buộc:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.2, 
+            "temperature": 0.1,  # Hạ thấp temperature để AI bám sát định dạng gốc hơn
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json"
         }
@@ -122,7 +149,8 @@ Cấu trúc JSON bắt buộc:
     async with httpx.AsyncClient() as client:
         try:
             print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
-            response = await client.post(url, json=payload, timeout=60.0)
+            # Tăng timeout lên 120s vì xử lý 5 ảnh sẽ tốn thời gian hơn 1 ảnh
+            response = await client.post(url, json=payload, timeout=120.0)
             
             if response.status_code != 200:
                 print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code}")
@@ -141,31 +169,28 @@ Cấu trúc JSON bắt buộc:
             
             try:
                 parsed_json = json.loads(raw_result, strict=False)
-                print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
+                print(f"[SUCCESS] Trích xuất thành công nội dung từ {image_count} ảnh.")
                 return {"result": parsed_json}
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
             
         except httpx.ReadTimeout:
-            print("[TIMEOUT] Quá thời gian 60 giây.")
-            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi (60 giây)."})
+            print("[TIMEOUT] Quá thời gian chờ (120 giây).")
+            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi do ảnh quá nhiều hoặc quá nặng."})
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Lỗi nội bộ: {str(e)}"})
 
 # ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU - ĐÃ SỬA LỖI GIẢI MÃ)
+# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Nội dung văn bản trống."})
 
-    # Cắt chuỗi tối đa 200 ký tự để không làm sập API Google Translate TTS miễn phí
     safe_text = text[:200].strip()
-    
     base_url = "https://translate.googleapis.com/translate_tts"
-    # Dùng `params` giúp tự động encode các ký tự đặc biệt, xuống dòng, khoảng trắng thành chuẩn URL
     params = {
         "client": "gtx",
         "ie": "UTF-8",
@@ -176,25 +201,15 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     
     async with httpx.AsyncClient() as client:
         try:
-            # Chuyển sang lấy toàn bộ content thay vì dùng `.stream()` mù quáng nhằm kiểm tra mã trạng thái
             resp = await client.get(base_url, params=params, headers=headers, timeout=15.0)
-            
             if resp.status_code != 200:
-                print(f"[TTS ERROR] Google TTS từ chối (Mã {resp.status_code}). Có thể do bị rate-limit.")
-                return JSONResponse(
-                    status_code=resp.status_code, 
-                    content={"error": "Google TTS phản hồi lỗi. Vui lòng thử lại sau."}
-                )
-                
-            # Trả về StreamingResponse an toàn từ BytesIO
+                return JSONResponse(status_code=resp.status_code, content={"error": "Google TTS phản hồi lỗi."})
             return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
-            
         except Exception as e:
-            print(f"[TTS CRITICAL LỖI]: {e}")
-            return JSONResponse(status_code=500, content={"error": f"Không thể kết nối đến server TTS: {str(e)}"})
+            return JSONResponse(status_code=500, content={"error": f"Lỗi kết nối TTS: {str(e)}"})
 
 # ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT (ĐÃ SỬA LỖI MÃ HÓA)
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -202,35 +217,23 @@ class BulkTTSRequest(BaseModel):
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     base_url = "https://translate.googleapis.com/translate_tts"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
     
     async with httpx.AsyncClient() as client:
         for text in req.texts:
-            if not text or not text.strip():
-                continue
-            
-            # Đảm bảo mỗi đoạn nhỏ gửi lên không vượt quá giới hạn ký tự
+            if not text or not text.strip(): continue
             safe_text = text[:200].strip()
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": safe_text
-            }
+            params = {"client": "gtx", "ie": "UTF-8", "tl": req.lang, "q": safe_text}
             try:
                 resp = await client.get(base_url, params=params, headers=headers, timeout=15.0)
-                if resp.status_code == 200:
-                    combined_audio.extend(resp.content)
-                else:
-                    print(f"[WARNING] Bỏ qua đoạn do lỗi mã {resp.status_code} từ Google: '{safe_text[:30]}...'")
-            except Exception as e:
-                print(f"[WARNING] Bỏ qua đoạn âm thanh do lỗi kết nối: {e}")
+                if resp.status_code == 200: combined_audio.extend(resp.content)
+            except Exception:
+                pass
                 
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tải bất kỳ đoạn audio nào từ server TTS."})
+        return JSONResponse(status_code=500, content={"error": "Lỗi tổng hợp audio."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
