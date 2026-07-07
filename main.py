@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-# Thử tải biến môi trường từ file .env nếu chạy ở môi trường local
+# Thử tải biến môi trường từ file .env nếu chạy local
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -20,11 +20,11 @@ except ImportError:
 app = FastAPI(title="SaaS OCR Reader Backend")
 
 # ==========================================
-# CẤU HÌNH CORS MIDDLEWARE
+# CẤU HÌNH CORS MIDDLEWARE (Quan trọng cho Render)
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Cho phép HTML local truy cập vào Render
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,7 +39,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader đang chạy ổn định!",
+        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy!",
         "endpoints": {
             "OCR & Extract": "/api/extract [POST]",
             "TTS Stream": "/api/tts [GET]",
@@ -53,37 +53,47 @@ class ExtractRequest(BaseModel):
     rawText: Optional[str] = None
 
 # ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI 
+# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
 # ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR LỚN ==========")
+    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR ==========")
     
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[LỖI] Hệ thống thiếu biến môi trường GEMINI_API_KEY")
+        print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
         return JSONResponse(
             status_code=500, 
-            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên hệ thống server Render."}
+            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
         )
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    PROMPT_TEXT = """
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp thành cấu trúc dữ liệu được yêu cầu.
+    # PROMPT MỚI: Đồng bộ 100% với Frontend (Yêu cầu trả về mảng Object visual/spoken)
+    PROMPT_TEXT = r"""
+Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
 
-📐 QUY TẮC CHO TRƯỜNG "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- TUYỆT ĐỐI KHÔNG DÙNG THẺ HTML. Hãy xuống dòng bình thường để chia các phân đoạn văn bản.
-- Mọi công thức Toán học, Vật Lý, Hóa học phức tạp BẮT BUỘC phải chuyển đổi thành mã LaTeX chuẩn.
-- Công thức nằm cùng dòng văn bản (Inline): Bọc bằng ký tự `$`. Ví dụ: $v = s/t$
-- Công thức đứng riêng một dòng (Block): Bọc bằng ký tự `$$`. Ví dụ: $$F = m \\cdot a$$
+Cấu trúc JSON bắt buộc:
+[
+  {
+    "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
+    "spoken": "Đề kiểm tra môn Vật Lý. Câu một: Tính vận tốc..."
+  }
+]
 
-🚨 QUY TẮC CHO TRƯỜNG "spoken" (DÙNG ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Hãy chia nhỏ nội dung bài học thành các câu ngắn. Mỗi phần tử chỉ nên chứa tối đa 1-2 câu ngắn (khoảng 15 đến 30 từ) để tránh máy đọc bị ngắt quãng hoặc hụt hơi.
-- TUYỆT ĐỐI KHÔNG chứa mã LaTeX hoặc ký tự đặc biệt của Toán học. Phải dịch toàn bộ các công thức thành ngôn ngữ nói tiếng Việt tự nhiên (Ví dụ: dịch "H2O" thành "H hai O", dịch "x^2 + y^2" thành "x bình phương cộng y bình phương", dịch "\\sqrt{x}" thành "căn bậc hai của x").
-- Chỉ chứa chữ cái tiếng Việt có dấu, số đếm thông thường và các dấu câu cơ bản (, . ! ?).
-"""
+📐 QUY TẮC CHO "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
+- KHÔNG DÙNG THẺ HTML (vì Frontend dùng textContent). Hãy dùng ký tự ngắt dòng `\n\n` để chia đoạn, tạo khoảng trắng giúp giao diện dễ nhìn.
+- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
+- Công thức trong dòng (Inline): Bọc bằng `$`. Ví dụ: `$v = s/t$`
+- Công thức đứng riêng (Block): Bọc bằng `$$`. Ví dụ: `$$F = m \cdot a$$`
+- LƯU Ý JSON: Phải nhân đôi dấu gạch chéo ngược cho lệnh LaTeX để không làm hỏng cú pháp JSON (Ví dụ: `\\frac{a}{b}`, `\\sqrt{x}`, `\\Delta`).
+
+🚨 QUY TẮC CHO "spoken" (ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
+- Chia nội dung thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa 1-2 câu (khoảng 15-30 từ) để máy đọc không bị ngắt quãng.
+- KHÔNG chứa mã LaTeX. Phải dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "x bình phương cộng y bình phương", "căn bậc hai của x").
+- Chỉ chứa chữ cái, số và dấu câu cơ bản (, . ! ?).
+    """
 
     parts = []
     if req.fileBase64 and req.mimeType:
@@ -104,60 +114,40 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.1,  
+            "temperature": 0.2, 
             "maxOutputTokens": 8192,
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "visual": {"type": "STRING"},
-                        "spoken": {"type": "STRING"}
-                    },
-                    "required": ["visual", "spoken"]
-                }
-            }
+            "responseMimeType": "application/json" # Ép Google Gemini trả về chuẩn JSON
         }
     }
 
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            print("[INFO] Đang gửi yêu cầu và đợi Google Gemini API xử lý...")
+            print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
             response = await client.post(url, json=payload, timeout=60.0)
             
             if response.status_code != 200:
-                print(f"[API ERROR] Google API trả về mã lỗi HTTP: {response.status_code}")
-                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi từ phía Gemini: {response.text}"})
+                print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code}")
+                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini: {response.text}"})
             
             data = response.json()
             candidates = data.get("candidates", [])
             if not candidates:
-                return JSONResponse(status_code=400, content={"error": "Yêu cầu bị chặn bởi bộ lọc an toàn đầu vào của Google."})
+                return JSONResponse(status_code=400, content={"error": "Bị chặn bởi chính sách an toàn đầu vào."})
                 
             candidate = candidates[0]
             if "content" not in candidate:
-                return JSONResponse(status_code=400, content={"error": "Nội dung phản hồi bị vi phạm bộ lọc đầu ra của AI."})
+                return JSONResponse(status_code=400, content={"error": "AI vi phạm bộ lọc đầu ra."})
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            if raw_result.startswith("```json"):
-                raw_result = raw_result[7:]
-            elif raw_result.startswith("```"):
-                raw_result = raw_result[3:]
-            if raw_result.endswith("```"):
-                raw_result = raw_result[:-3]
-            raw_result = raw_result.strip()
-            
-            raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
-            
             try:
+                # Parse mảng JSON trả về từ AI
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
-                return {"result": parsed_json} 
+                return {"result": parsed_json} # Trả về đúng mảng object cho Frontend
             except json.JSONDecodeError as e:
-                print(f"[CRITICAL ERROR] JSON lỗi định dạng chi tiết: {e}")
-                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "details": str(e), "raw": raw_result})
+                print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
+                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
             
         except httpx.ReadTimeout:
             print("[TIMEOUT] Quá thời gian 60 giây.")
@@ -170,19 +160,12 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    # FIX LỖI: Sử dụng dictionary params để httpx tự động mã hóa URL an toàn
-    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
-    params = {
-        "client": "gtx",
-        "ie": "UTF-8",
-        "tl": lang,
-        "q": text
-    }
+    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False) as client:
-            async with client.stream("GET", target_url, params=params, headers=headers) as r:
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", target_url, headers=headers) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
 
@@ -200,27 +183,16 @@ async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
-    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
     
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient() as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            
-            # FIX LỖI: Truyền parameters đúng chuẩn
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": text
-            }
-            
+            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
             try:
-                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
-                else:
-                    print(f"[WARNING] API TTS trả về mã lỗi: {resp.status_code}")
             except Exception as e:
                 print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
                 
