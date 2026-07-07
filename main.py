@@ -3,19 +3,12 @@ import json
 import httpx
 import re
 import io
-import base64
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-
-# Thử tải thư viện đọc file Word
-try:
-    from docx import Document
-except ImportError:
-    print("[WARNING] Chưa cài python-docx. Hãy chạy: pip install python-docx")
 
 # Thử tải biến môi trường từ file .env nếu chạy local
 try:
@@ -77,14 +70,9 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT MỚI: Bổ sung quy tắc sống còn chặn AI tự chế/giải bài tập
+    # PROMPT MỚI: Đồng bộ 100% với Frontend (Yêu cầu trả về mảng Object visual/spoken)
     PROMPT_TEXT = r"""
 Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
-
-🚨 QUY TẮC SỐNG CÒN (KHÔNG ĐƯỢC VI PHẠM):
-- TUYỆT ĐỐI BÁM SÁT nội dung gốc hiển thị trong tài liệu.
-- KHÔNG TỰ BỊA THÊM CHỮ, KHÔNG tự ý giải bài tập, KHÔNG đưa ra đáp án nếu tài liệu không có.
-- Chỉ làm nhiệm vụ của một máy đọc (OCR) thuần túy.
 
 Cấu trúc JSON bắt buộc:
 [
@@ -110,21 +98,7 @@ Cấu trúc JSON bắt buộc:
     parts = []
     if req.fileBase64 and req.mimeType:
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
-        
-        # VÁ LỖI FILE WORD: Kiểm tra nếu là file docx thì tự đọc bằng python-docx
-        if "wordprocessingml.document" in req.mimeType:
-            try:
-                print("[INFO] Đang bóc tách text từ file Word (.docx)...")
-                doc_bytes = base64.b64decode(clean_b64)
-                doc = Document(io.BytesIO(doc_bytes))
-                extracted_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-                parts.append({"text": f"Nội dung file tài liệu Word được cung cấp:\n{extracted_text}"})
-            except Exception as e:
-                print(f"[ERROR] Lỗi đọc file Word: {e}")
-                return JSONResponse(status_code=400, content={"error": f"Không thể đọc file Word: {str(e)}"})
-        else:
-            # Nếu là PDF/Ảnh thì gửi file vào inlineData cho Gemini tự đọc
-            parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
+        parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
         
     if req.rawText:
         parts.append({"text": req.rawText})
@@ -140,13 +114,13 @@ Cấu trúc JSON bắt buộc:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.4,  # ÉP NHIỆT ĐỘ VỀ 0.0 ĐỂ KHÔNG ĐƯỢC TỰ BỊA CHỮ
+            "temperature": 0.1, 
             "maxOutputTokens": 8192,
-            "responseMimeType": "application/json" 
+            "responseMimeType": "application/json" # Ép Google Gemini trả về chuẩn JSON
         }
     }
 
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient() as client:
         try:
             print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
             response = await client.post(url, json=payload, timeout=60.0)
@@ -166,13 +140,11 @@ Cấu trúc JSON bắt buộc:
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # Vá luôn lỗi AI thỉnh thoảng dư dấu phẩy ở cuối mảng JSON
-            raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
-            
             try:
+                # Parse mảng JSON trả về từ AI
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
-                return {"result": parsed_json} 
+                return {"result": parsed_json} # Trả về đúng mảng object cho Frontend
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
@@ -188,19 +160,12 @@ Cấu trúc JSON bắt buộc:
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = "https://translate.googleapis.com/translate_tts"
-    # Dùng params để HTTPX tự động xử lý dấu cách, chống lỗi sập server
-    params = {
-        "client": "gtx",
-        "ie": "UTF-8",
-        "tl": lang,
-        "q": text
-    }
+    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False) as client:
-            async with client.stream("GET", target_url, params=params, headers=headers) as r:
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", target_url, headers=headers) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
 
@@ -218,23 +183,14 @@ async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
-    target_url = "https://translate.googleapis.com/translate_tts"
     
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient() as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            
-            # Dùng params để chống lỗi
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": text
-            }
-            
+            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
             try:
-                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
             except Exception as e:
