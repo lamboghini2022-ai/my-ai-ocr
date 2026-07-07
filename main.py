@@ -50,7 +50,7 @@ class ImagePayload(BaseModel):
     mimeType: str
 
 class ExtractRequest(BaseModel):
-    images: Optional[List[ImagePayload]] = None  # Hỗ trợ gửi mảng nhiều ảnh
+    images: Optional[List[ImagePayload]] = None  
     rawText: Optional[str] = None
 
 class BulkTTSRequest(BaseModel):
@@ -69,30 +69,35 @@ async def extract_text(req: ExtractRequest):
         print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
         return JSONResponse(status_code=500, content={"error": "Thiếu biến môi trường GEMINI_API_KEY."})
 
+    # Cập nhật model name chuẩn xác của Google (1.5 hoặc 2.0)
     model_name = "gemini-2.5-flash" 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT rõ ràng, không đe dọa AI để tránh lỗi sinh mảng rỗng
+    # PROMPT ĐÃ ĐƯỢC TỐI ƯU HÓA LẠI
     PROMPT_TEXT = """
-Bạn là Hệ thống Trích xuất Dữ liệu OCR (Optical Character Recognition) chuyên nghiệp.
-Nhiệm vụ của bạn là đọc TOÀN BỘ văn bản từ các hình ảnh tôi cung cấp, không được bỏ sót bất kỳ chữ hay công thức nào.
-Hãy chia nội dung thành các phần logic (theo từng đoạn văn, hoặc từng câu hỏi).
+Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp.
+Nhiệm vụ: Trích xuất TOÀN BỘ văn bản từ hình ảnh, không bỏ sót chữ, số, công thức Toán, Lý, hay Hóa học nào.
+Chia nội dung thành các phần logic (theo từng đoạn văn, câu hỏi, hoặc bài tập).
 
-YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "visual" (Hiển thị UI):
-1. Giữ nguyên cấu trúc văn bản gốc. Dùng `\n\n` để ngắt dòng, tạo khoảng cách rộng rãi, dễ đọc.
-2. TẤT CẢ công thức, ký hiệu Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
-3. Chú ý: Vì output là JSON, bạn phải nhân đôi dấu gạch chéo ngược cho LaTeX. Ví dụ: viết `\\\\frac{a}{b}` (thay vì \frac), `\\\\sqrt{x}` (thay vì \sqrt), `\\\\Delta` (thay vì \Delta).
-4. Công thức nằm trong dòng bọc bằng `$ $`, công thức đứng riêng 1 dòng bọc bằng `$$ $$`.
+YÊU CẦU CHO TRƯỜNG "visual" (Hiển thị UI):
+1. Giữ nguyên cấu trúc. Dùng Markdown (`**đậm**`, `*nghiêng*`) để làm nổi bật tiêu đề hoặc nhấn mạnh nếu cần.
+2. Dùng `\n\n` để ngắt dòng giữa các đoạn, tạo khoảng cách rộng rãi, dễ đọc.
+3. TẤT CẢ công thức, ký hiệu Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX chuẩn.
+   - Trong dòng: bọc trong `$ $` (VD: $x^2 + y^2 = z^2$, $H_2SO_4$).
+   - Riêng một dòng: bọc trong `$$ $$`.
+   - HÓA HỌC: Trình bày rõ ràng các chỉ số trên/dưới, ký hiệu phản ứng (VD: $Fe^{3+}$, $CO_3^{2-}$, $2H_2 + O_2 \rightarrow 2H_2O$).
+4. QUAN TRỌNG: KHÔNG TỰ Ý NHÂN ĐÔI DẤU GẠCH CHÉO NGƯỢC. Cứ viết cú pháp LaTeX bình thường (VD: \frac, \sqrt, \rightarrow). Hệ thống schema JSON sẽ tự động escape.
 
-YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
-1. KHÔNG chứa mã LaTeX, KHÔNG chứa ký hiệu toán học phức tạp.
-2. Dịch mọi công thức ra tiếng Việt thuần túy (VD: "x bình phương", "căn bậc hai của a", "phân số a phần b").
-3. Độ dài mỗi đoạn vừa phải (15 - 30 từ) để máy đọc không bị hụt hơi.
+YÊU CẦU CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
+1. KHÔNG chứa mã LaTeX, KHÔNG chứa ký hiệu toán/hóa học phức tạp.
+2. Dịch mọi công thức ra tiếng Việt thuần túy, mô phỏng cách con người đọc:
+   - Toán: "x bình phương", "căn bậc hai của a", "phân số a phần b".
+   - Hóa học: Đọc rõ từng chất. VD: "Hát hai ét ô bốn" (H2SO4), "sắt ba cộng" (Fe3+), "mũi tên tạo ra" (->), "nhiệt độ" (t độ).
+3. Độ dài mỗi đoạn vừa phải (15 - 40 từ), ngắt nghỉ bằng dấu phẩy và dấu chấm để máy đọc trôi chảy.
     """
 
     parts = []
     
-    # Xử lý mảng hình ảnh
     if req.images:
         print(f"[INFO] Nhận được {len(req.images)} ảnh. Đang đưa vào AI...")
         for img in req.images:
@@ -104,7 +109,7 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
     
     parts.append({"text": PROMPT_TEXT})
 
-    # Cấu hình Payload có kèm RESPONSE SCHEMA (Bắt buộc AI trả JSON chuẩn)
+    # Cấu hình Payload có kèm RESPONSE SCHEMA
     payload = {
         "contents": [{"parts": parts}],
         "safetySettings": [
@@ -114,7 +119,7 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.2, 
+            "temperature": 0.1,  # Hạ nhiệt độ xuống 0.1 để OCR bám sát văn bản gốc nhất có thể
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
             "responseSchema": {
@@ -125,11 +130,11 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
                     "properties": {
                         "visual": {
                             "type": "STRING",
-                            "description": "Văn bản hiển thị. Dùng \\n\\n ngắt dòng. Phải chứa LaTeX có double backslash (\\\\) cho Toán học."
+                            "description": "Văn bản hiển thị. Dùng Markdown và \\n\\n ngắt dòng. Sử dụng LaTeX chuẩn cho Toán/Lý/Hóa (không nhân đôi backslash)."
                         },
                         "spoken": {
                             "type": "STRING",
-                            "description": "Văn bản để máy đọc tiếng Việt, không chứa LaTeX, dịch công thức ra chữ."
+                            "description": "Văn bản để máy đọc tiếng Việt, không chứa LaTeX, phiên âm rõ ràng công thức hóa học và toán học ra chữ."
                         }
                     },
                     "required": ["visual", "spoken"]
@@ -140,7 +145,7 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
 
     async with httpx.AsyncClient() as client:
         try:
-            print("[INFO] Đang gửi yêu cầu đến Google Gemini API...")
+            print(f"[INFO] Đang gửi yêu cầu đến {model_name} API...")
             response = await client.post(url, json=payload, timeout=120.0) 
             
             if response.status_code != 200:
@@ -150,7 +155,7 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
             data = response.json()
             candidates = data.get("candidates", [])
             if not candidates:
-                return JSONResponse(status_code=400, content={"error": "Bị chặn bởi bộ lọc an toàn."})
+                return JSONResponse(status_code=400, content={"error": "Bị chặn bởi bộ lọc an toàn hoặc không thể trích xuất."})
                 
             candidate = candidates[0]
             if "content" not in candidate:
@@ -159,20 +164,20 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
             try:
-                # Do đã có responseSchema, tỷ lệ lỗi parse JSON gần như bằng 0
+                # Phân tích cú pháp JSON
                 parsed_json = json.loads(raw_result, strict=False)
                 
                 # Kiểm tra nếu AI trả về mảng rỗng
                 if not parsed_json:
                     print("[CẢNH BÁO] Trích xuất thành công nhưng mảng rỗng []!")
-                    return JSONResponse(status_code=400, content={"error": "AI không tìm thấy văn bản trong ảnh hoặc ảnh quá mờ."})
+                    return JSONResponse(status_code=400, content={"error": "Không tìm thấy nội dung hợp lệ hoặc ảnh chứa dữ liệu khó đọc."})
 
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
                 return {"result": parsed_json}
 
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
-                return JSONResponse(status_code=500, content={"error": "JSON parse error", "raw": raw_result})
+                return JSONResponse(status_code=500, content={"error": "Lỗi định dạng JSON trả về từ AI.", "raw": raw_result})
             
         except httpx.ReadTimeout:
             print("[TIMEOUT] Quá thời gian 120 giây.")
@@ -180,7 +185,6 @@ YÊU CẦU TRÌNH BÀY CHO TRƯỜNG "spoken" (Đọc giọng nói TTS):
         except Exception as e:
             print(f"[LỖI NỘI BỘ] {str(e)}")
             return JSONResponse(status_code=500, content={"error": f"Lỗi máy chủ: {str(e)}"})
-
 
 # ==========================================
 # 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
@@ -198,13 +202,12 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
 
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
-
 # ==========================================
 # 3. API GHÉP NỐI MP3 HÀNG LOẠT 
 # ==========================================
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\n========== TỔNG HỢP AUDIO ({len(req.texts)} phần tử) ==========")
+    print(f"\n========== TỔNG HỢP AUDIO ({len(req.texts)} đoạn) ==========")
     headers = {"User-Agent": "Mozilla/5.0"}
     combined_audio = bytearray()
     
