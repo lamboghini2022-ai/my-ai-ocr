@@ -69,7 +69,7 @@ async def extract_text(req: ExtractRequest):
         )
 
     model_name = "gemini-2.5-flash"
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_name}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # PROMPT ĐƯỢC THIẾT KẾ ĐẶC BIỆT
     PROMPT_TEXT = r"""
@@ -102,7 +102,6 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
 
     parts = []
     if req.fileBase64 and req.mimeType:
-        # Làm sạch chuỗi Base64 loại bỏ phần header của data-uri nếu frontend gửi lên thừa
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', req.fileBase64)
         parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
         
@@ -111,7 +110,6 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
     
     parts.append({"text": PROMPT_TEXT})
 
-    # SỬ DỤNG STRUCTURED OUTPUTS (responseSchema)
     payload = {
         "contents": [{"parts": parts}],
         "safetySettings": [
@@ -138,7 +136,8 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
         }
     }
 
-    async with httpx.AsyncClient() as client:
+    # FIX LỖI: Thêm trust_env=False để bỏ qua Proxy/VPN của máy tính
+    async with httpx.AsyncClient(trust_env=False) as client:
         try:
             print("[INFO] Đang gửi yêu cầu và đợi Google Gemini API xử lý...")
             response = await client.post(url, json=payload, timeout=60.0)
@@ -158,14 +157,12 @@ Cấu trúc JSON bắt buộc phải tuân theo mẫu sau:
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # ĐÃ FIX: Tiền xử lý dọn dẹp chuỗi xóa block markdown ```json nếu có
             raw_result = re.sub(r"^```json\n?|```$", "", raw_result, flags=re.MULTILINE).strip()
             
             try:
-                # Parse mảng JSON trả về từ AI
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
-                return {"result": parsed_json} # Trả về đúng mảng object cho Frontend
+                return {"result": parsed_json} 
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
@@ -185,7 +182,8 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     async def stream_audio():
-        async with httpx.AsyncClient() as client:
+        # FIX LỖI: Thêm trust_env=False
+        async with httpx.AsyncClient(trust_env=False) as client:
             async with client.stream("GET", target_url, headers=headers) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
@@ -205,7 +203,8 @@ async def bulk_tts(req: BulkTTSRequest):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
     
-    async with httpx.AsyncClient() as client:
+    # FIX LỖI: Thêm trust_env=False
+    async with httpx.AsyncClient(trust_env=False) as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
