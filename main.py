@@ -71,7 +71,7 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT ĐÃ ĐƯỢC TỐI ƯU: Loại bỏ các quy tắc ép cấu trúc JSON thủ công để không làm xung đột hệ thống
+    # PROMPT ĐÃ ĐƯỢC TỐI ƯU
     PROMPT_TEXT = """
 Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung từ hình ảnh hoặc văn bản thô được cung cấp thành cấu trúc dữ liệu được yêu cầu.
 
@@ -143,7 +143,7 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # FIX LỖI REGEX: Bóc tách cặp dấu ```json ... ``` một cách an toàn, không dùng Regex cắt lung tung nữa
+            # 1. Bóc tách dấu bọc markdown nếu có
             if raw_result.startswith("```json"):
                 raw_result = raw_result[7:]
             elif raw_result.startswith("```"):
@@ -152,13 +152,17 @@ Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhi
                 raw_result = raw_result[:-3]
             raw_result = raw_result.strip()
             
+            # 2. VÁ LỖI TỰ ĐỘNG: Xóa bỏ tất cả các dấu phẩy thừa (trailing comma) phá hoại cấu trúc JSON
+            raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
+            
             try:
-                # Parse mảng JSON trả về từ AI công thêm chế độ strict=False để bỏ qua ký tự điều khiển lạ
+                # Parse mảng JSON
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
                 return {"result": parsed_json} 
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng chi tiết: {e}")
+                print(f"[DEBUG LOG] Chuỗi RAW gây lỗi từ AI:\n{raw_result}\n[END DEBUG LOG]")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "details": str(e), "raw": raw_result})
             
         except httpx.ReadTimeout:
