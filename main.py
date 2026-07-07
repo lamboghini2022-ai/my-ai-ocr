@@ -69,7 +69,7 @@ async def extract_text(req: ExtractRequest):
         print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
         return JSONResponse(status_code=500, content={"error": "Thiếu biến môi trường GEMINI_API_KEY."})
 
-    model_name = "gemini-.5-flash" 
+    model_name = "gemini-2.5-flash" 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # PROMPT rõ ràng, không đe dọa AI để tránh lỗi sinh mảng rỗng
