@@ -60,7 +60,7 @@ async def extract_text(req: ExtractRequest):
     if not api_key:
         return JSONResponse(status_code=500, content={"error": "Thiếu cấu hình GEMINI_API_KEY"})
 
-    model_name = "gemini-1.5-flash" # Chú ý: Dùng 1.5-flash để ổn định, 2.5-flash hiện đang là bản preview có thể thiếu ổn định.
+    model_name = "gemini-2.5-flash" 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # PROMPT MỚI: Thêm quy tắc bảo vệ JSON nghiêm ngặt
