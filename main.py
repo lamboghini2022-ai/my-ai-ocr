@@ -70,6 +70,7 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
+    # PROMPT MỚI: Đồng bộ 100% với Frontend (Yêu cầu trả về mảng Object visual/spoken)
     PROMPT_TEXT = r"""
 Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
 
@@ -115,7 +116,7 @@ Cấu trúc JSON bắt buộc:
         "generationConfig": {
             "temperature": 0.2, 
             "maxOutputTokens": 8192,
-            "responseMimeType": "application/json"
+            "responseMimeType": "application/json" # Ép Google Gemini trả về chuẩn JSON
         }
     }
 
@@ -140,9 +141,10 @@ Cấu trúc JSON bắt buộc:
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
             try:
+                # Parse mảng JSON trả về từ AI
                 parsed_json = json.loads(raw_result, strict=False)
                 print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
-                return {"result": parsed_json}
+                return {"result": parsed_json} # Trả về đúng mảng object cho Frontend
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
                 return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
@@ -154,47 +156,23 @@ Cấu trúc JSON bắt buộc:
             return JSONResponse(status_code=500, content={"error": f"Lỗi nội bộ: {str(e)}"})
 
 # ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU - ĐÃ SỬA LỖI GIẢI MÃ)
+# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
 # ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    if not text or not text.strip():
-        return JSONResponse(status_code=400, content={"error": "Nội dung văn bản trống."})
-
-    # Cắt chuỗi tối đa 200 ký tự để không làm sập API Google Translate TTS miễn phí
-    safe_text = text[:200].strip()
-    
-    base_url = "https://translate.googleapis.com/translate_tts"
-    # Dùng `params` giúp tự động encode các ký tự đặc biệt, xuống dòng, khoảng trắng thành chuẩn URL
-    params = {
-        "client": "gtx",
-        "ie": "UTF-8",
-        "tl": lang,
-        "q": safe_text
-    }
+    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    async with httpx.AsyncClient() as client:
-        try:
-            # Chuyển sang lấy toàn bộ content thay vì dùng `.stream()` mù quáng nhằm kiểm tra mã trạng thái
-            resp = await client.get(base_url, params=params, headers=headers, timeout=15.0)
-            
-            if resp.status_code != 200:
-                print(f"[TTS ERROR] Google TTS từ chối (Mã {resp.status_code}). Có thể do bị rate-limit.")
-                return JSONResponse(
-                    status_code=resp.status_code, 
-                    content={"error": "Google TTS phản hồi lỗi. Vui lòng thử lại sau."}
-                )
-                
-            # Trả về StreamingResponse an toàn từ BytesIO
-            return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
-            
-        except Exception as e:
-            print(f"[TTS CRITICAL LỖI]: {e}")
-            return JSONResponse(status_code=500, content={"error": f"Không thể kết nối đến server TTS: {str(e)}"})
+    async def stream_audio():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", target_url, headers=headers) as r:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
 # ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT (ĐÃ SỬA LỖI MÃ HÓA)
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT 
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -203,7 +181,6 @@ class BulkTTSRequest(BaseModel):
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
-    base_url = "https://translate.googleapis.com/translate_tts"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
     
@@ -211,26 +188,16 @@ async def bulk_tts(req: BulkTTSRequest):
         for text in req.texts:
             if not text or not text.strip():
                 continue
-            
-            # Đảm bảo mỗi đoạn nhỏ gửi lên không vượt quá giới hạn ký tự
-            safe_text = text[:200].strip()
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": safe_text
-            }
+            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
             try:
-                resp = await client.get(base_url, params=params, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
-                else:
-                    print(f"[WARNING] Bỏ qua đoạn do lỗi mã {resp.status_code} từ Google: '{safe_text[:30]}...'")
             except Exception as e:
-                print(f"[WARNING] Bỏ qua đoạn âm thanh do lỗi kết nối: {e}")
+                print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
                 
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tải bất kỳ đoạn audio nào từ server TTS."})
+        return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ server TTS."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
