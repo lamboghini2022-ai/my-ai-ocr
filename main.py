@@ -115,21 +115,38 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # Đã rút gọn Prompt vì cấu trúc JSON giờ sẽ do Schema quản lý cứng
     PROMPT_TEXT = r"""
-Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
+Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
 
-🚨 QUY TẮC SỐNG CÒN:
-- BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG giải bài tập.
-- Chia nhỏ nội dung ra làm nhiều phần tử. Cứ xong 2-3 câu văn, hoặc 1 câu hỏi trắc nghiệm thì tạo một object mới.
+🚨 QUY TẮC CHỐNG TRÀN TOKEN VÀ CẮT NGANG JSON (QUAN TRỌNG NHẤT):
+- TUYỆT ĐỐI KHÔNG dồn toàn bộ văn bản quét được vào duy nhất một object.
+- Hãy CHIA NHỎ nội dung ra thành NHIỀU phẩn tử (object) trong mảng JSON. 
+- Cứ sau khoảng 2-4 câu văn, hoặc sau khi quét xong MỘT CÂU HỎI (đối với đề trắc nghiệm), bạn BẮT BUỘC phải đóng object đó lại và mở một object mới.
 
-📐 QUY TẮC "visual" (Nội dung gốc):
-- KHÔNG DÙNG THẺ HTML. Dùng `\n\n` để ngắt đoạn.
-- Công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. Inline: bọc bằng `$`. Block: bọc bằng `$$`.
+Cấu trúc JSON bắt buộc:
+[
+  {
+    "visual": "Câu 1: Tính vận tốc của vật...",
+    "spoken": "Câu một: Tính vận tốc của vật..."
+  },
+  {
+    "visual": "Câu 2: Cho hàm số bậc hai...",
+    "spoken": "Câu hai: Cho hàm số bậc hai..."
+  }
+]
 
-🚨 QUY TẮC "spoken" (Đọc TTS):
-- Dịch hoàn toàn ra tiếng Việt trơn (vd: $v$ -> "vận tốc", $\frac{1}{2}$ -> "một phần hai").
-- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn.
+🚨 QUY TẮC SỐNG CÒN KHÁC:
+- TUYỆT ĐỐI BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG tự giải bài tập.
+- Chỉ làm nhiệm vụ của một máy đọc (OCR) thuần túy.
+
+📐 QUY TẮC CHO "visual":
+- KHÔNG DÙNG THẺ HTML. Dùng ký tự ngắt dòng `\n\n` để chia đoạn nếu cần.
+- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. (Nhân đôi dấu gạch chéo ngược: `\\frac{a}{b}`).
+- Inline: Bọc bằng `$`. Block: Bọc bằng `$$`.
+
+🚨 QUY TẮC CHO "spoken" (ĐỂ ĐỌC TTS):
+- Chia câu ngắn (1-2 câu). KHÔNG chứa LaTeX, dịch ra tiếng Việt trơn hoàn toàn (Ví dụ: $v$ thành "vận tốc", $\frac{1}{2}$ thành "một phần hai").
+- Chỉ chứa chữ cái, số và dấu câu cơ bản.
     """
 
     items_to_scan = [] 
@@ -149,15 +166,15 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
                 
-        # 2. FILE ẢNH (Chia nhỏ với MAX_HEIGHT = 1000)
+        # 2. FILE ẢNH 
         elif mime_type_lower.startswith("image/"):
             try:
                 img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
                 width, height = img.size
-                MAX_HEIGHT = 1000  
+                MAX_HEIGHT = 2000
                 
                 if height > MAX_HEIGHT:
-                    print(f"[INFO] Ảnh cao {height}px. Tiến hành cắt mảnh {MAX_HEIGHT}px...")
+                    print(f"[INFO] Ảnh quá dài ({height}px). Tiến hành chia mảnh nhỏ ({MAX_HEIGHT}px)...")
                     for i in range(0, height, MAX_HEIGHT):
                         box = (0, i, width, min(i + MAX_HEIGHT, height))
                         chunk_img = img.crop(box)
@@ -186,31 +203,24 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
 
     # ==========================================
-    # CƠ CHẾ XỬ LÝ ĐA LUỒNG
+    # CƠ CHẾ XỬ LÝ ĐA LUỒNG (CONCURRENCY)
     # ==========================================
     max_concurrent_tasks = 5  
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
     
-    # KHIẾN GEMINI BẮT BUỘC TRẢ VỀ CHUẨN JSON VỚI SCHEMAS
+    # ĐỊNH NGHĨA KHUÔN MẪU ĐẦU RA - GIẢI QUYẾT TRIỆT ĐỂ LỖI CÚ PHÁP
     json_schema = {
         "type": "ARRAY",
-        "description": "Danh sách các đoạn văn bản trích xuất được. Chủ động chia nhỏ thành nhiều phần tử nếu tài liệu dài.",
         "items": {
             "type": "OBJECT",
             "properties": {
-                "visual": {
-                    "type": "STRING",
-                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX."
-                },
-                "spoken": {
-                    "type": "STRING",
-                    "description": "Văn bản dịch thuần tiếng Việt để đọc TTS."
-                }
+                "visual": {"type": "STRING"},
+                "spoken": {"type": "STRING"}
             },
             "required": ["visual", "spoken"]
         }
     }
-    
+
     async def process_single_page(idx: int, item: dict, client: httpx.AsyncClient):
         async with semaphore:
             print(f"[INFO] Đang thực thi OCR tác vụ {idx + 1}/{len(items_to_scan)}...")
@@ -238,31 +248,30 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                     "temperature": 0.0, 
                     "maxOutputTokens": 8192,
                     "responseMimeType": "application/json",
-                    "responseSchema": json_schema # Áp dụng khuôn mẫu cấu trúc nghiêm ngặt
+                    "responseSchema": json_schema # <-- NẠP KHUÔN MẪU VÀO ĐÂY
                 }
             }
             
             try:
                 resp = await client.post(url, json=payload, timeout=120.0)
                 if resp.status_code != 200:
-                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini API lỗi: {resp.text}")
+                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini báo lỗi: {resp.text}")
                     return []
                     
                 data = resp.json()
                 candidate = data.get("candidates", [])[0]
                 raw_result = candidate["content"]["parts"][0]["text"].strip()
                 
-                # Chuyển đổi trực tiếp vì JSON chắc chắn chuẩn 100%
-                parsed_json = json.loads(raw_result)
-                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất được {len(parsed_json)} đoạn.")
+                # BỎ HOÀN TOÀN REGEX CỨU VỚT Ở ĐÂY VÀ PARSE TRỰC TIẾP
+                parsed_json = json.loads(raw_result, strict=False)
+                
+                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất được {len(parsed_json)} đoạn văn bản hợp lệ.")
                 return parsed_json
-            except json.JSONDecodeError as json_err:
-                print(f"[LỖI HỆ THỐNG TÁC VỤ {idx + 1}] Phản hồi không phải JSON hợp lệ: {json_err}")
-                return []
             except Exception as e:
-                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc thực thi: {e}")
+                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc không thể khắc phục JSON: {e}")
                 return []
 
+    # Chạy toàn bộ các tác vụ song song
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
         tasks = [
