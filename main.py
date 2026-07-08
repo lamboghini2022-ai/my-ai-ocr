@@ -214,27 +214,49 @@ Cấu trúc JSON bắt buộc:
 # ==========================================
 # 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
 # ==========================================
+# Đừng quên thêm dòng này ở cùng chỗ với các import khác trên đầu file nhé:
+import textwrap 
+
+# ==========================================
+# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU - CÓ CHỐNG LỖI CÂU DÀI)
+# ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
+    if not text or not text.strip():
+        return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
+        
     target_url = "https://translate.googleapis.com/translate_tts"
-    params = {
-        "client": "gtx",
-        "ie": "UTF-8",
-        "tl": lang,
-        "q": text
-    }
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # Chia nhỏ văn bản nếu nó vượt quá 200 ký tự (Giới hạn của Google)
+    # textwrap giúp cắt chuỗi theo khoảng trắng, không làm đứt đôi 1 từ
+    text_chunks = textwrap.wrap(text, width=200, break_long_words=False)
     
     async def stream_audio():
         async with httpx.AsyncClient(trust_env=False) as client:
-            async with client.stream("GET", target_url, params=params, headers=headers) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+            for chunk in text_chunks:
+                params = {
+                    "client": "gtx",
+                    "ie": "UTF-8",
+                    "tl": lang,
+                    "q": chunk
+                }
+                try:
+                    async with client.stream("GET", target_url, params=params, headers=headers) as r:
+                        # Chỉ trả về luồng âm thanh nếu Google đồng ý (status 200)
+                        if r.status_code == 200:
+                            async for data in r.aiter_bytes():
+                                yield data
+                        else:
+                            print(f"[TTS WARNING] Google từ chối đọc đoạn: '{chunk}'. Mã lỗi: {r.status_code}")
+                except Exception as e:
+                    print(f"[TTS STREAM ERROR] Lỗi mạng khi lấy âm thanh: {e}")
 
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
+
 # ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT 
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT (AUDIOBOOK)
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -251,20 +273,25 @@ async def bulk_tts(req: BulkTTSRequest):
         for text in req.texts:
             if not text or not text.strip():
                 continue
+                
+            # Cũng phải áp dụng cắt nhỏ ở đây để tránh hỏng cả cục MP3
+            text_chunks = textwrap.wrap(text, width=200, break_long_words=False)
             
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": text
-            }
-            
-            try:
-                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
-                if resp.status_code == 200:
-                    combined_audio.extend(resp.content)
-            except Exception as e:
-                print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
+            for chunk in text_chunks:
+                params = {
+                    "client": "gtx",
+                    "ie": "UTF-8",
+                    "tl": req.lang,
+                    "q": chunk
+                }
+                try:
+                    resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                    if resp.status_code == 200:
+                        combined_audio.extend(resp.content)
+                    else:
+                        print(f"[TTS WARNING] Bỏ qua đoạn lỗi ({resp.status_code}): {chunk}")
+                except Exception as e:
+                    print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi mạng: {e}")
                 
     if not combined_audio:
         return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ server TTS."})
