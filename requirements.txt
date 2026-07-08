@@ -4,3 +4,4 @@ httpx
 pydantic
 python-dotenv
 python-docx
+pip install PyPDF2 Pillow
