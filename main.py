@@ -74,7 +74,6 @@ def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
         return [(pdf_b64, "application/pdf")]
         
     try:
-        # Xóa header base64 nếu còn sót
         clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', pdf_b64)
         pdf_bytes = base64.b64decode(clean_b64)
         
@@ -116,39 +115,30 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
+    # Đã rút gọn Prompt vì cấu trúc JSON giờ sẽ do Schema quản lý cứng
     PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
+Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
 
 🚨 QUY TẮC SỐNG CÒN:
-- TUYỆT ĐỐI BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG tự giải bài tập.
-- Chỉ làm nhiệm vụ của một máy đọc (OCR) thuần túy.
+- BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG giải bài tập.
+- Chia nhỏ nội dung ra làm nhiều phần tử. Cứ xong 2-3 câu văn, hoặc 1 câu hỏi trắc nghiệm thì tạo một object mới.
 
-Cấu trúc JSON bắt buộc:
-[
-  {
-    "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
-    "spoken": "Đề kiểm tra môn Vật Lý. Câu một: Tính vận tốc..."
-  }
-]
+📐 QUY TẮC "visual" (Nội dung gốc):
+- KHÔNG DÙNG THẺ HTML. Dùng `\n\n` để ngắt đoạn.
+- Công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. Inline: bọc bằng `$`. Block: bọc bằng `$$`.
 
-📐 QUY TẮC CHO "visual":
-- KHÔNG DÙNG THẺ HTML. Dùng ký tự ngắt dòng `\n\n` để chia đoạn.
-- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. (Nhân đôi dấu gạch chéo ngược: `\\frac{a}{b}`).
-- Inline: Bọc bằng `$`. Block: Bọc bằng `$$`.
-
-🚨 QUY TẮC CHO "spoken" (ĐỂ ĐỌC TTS):
-- Chia câu ngắn (1-2 câu). KHÔNG chứa LaTeX, dịch ra tiếng Việt trơn.
-- Chỉ chứa chữ cái, số và dấu câu cơ bản.
+🚨 QUY TẮC "spoken" (Đọc TTS):
+- Dịch hoàn toàn ra tiếng Việt trơn (vd: $v$ -> "vận tốc", $\frac{1}{2}$ -> "một phần hai").
+- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn.
     """
 
-    # DANH SÁCH CÁC TÁC VỤ CẦN QUÉT
     items_to_scan = [] 
 
     if req.fileBase64 and req.mimeType:
         clean_b64 = req.fileBase64.split(",", 1)[1] if "," in req.fileBase64 else req.fileBase64
         mime_type_lower = req.mimeType.lower()
         
-        # 1. FILE WORD (Chỉ xử lý 1 lần, không cần chia nhỏ)
+        # 1. FILE WORD
         if "wordprocessingml.document" in mime_type_lower or "msword" in mime_type_lower:
             if not DOCX_AVAILABLE:
                 return JSONResponse(status_code=500, content={"error": "Thiếu thư viện python-docx."})
@@ -159,22 +149,22 @@ Cấu trúc JSON bắt buộc:
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
                 
-        # 2. FILE ẢNH (Chia nhỏ nếu quá dài)
+        # 2. FILE ẢNH (Chia nhỏ với MAX_HEIGHT = 1000)
         elif mime_type_lower.startswith("image/"):
             try:
                 img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
                 width, height = img.size
-                MAX_HEIGHT = 2000 
+                MAX_HEIGHT = 1000  
                 
                 if height > MAX_HEIGHT:
-                    print(f"[INFO] Ảnh quá dài. Tiến hành cắt nhỏ...")
+                    print(f"[INFO] Ảnh cao {height}px. Tiến hành cắt mảnh {MAX_HEIGHT}px...")
                     for i in range(0, height, MAX_HEIGHT):
                         box = (0, i, width, min(i + MAX_HEIGHT, height))
                         chunk_img = img.crop(box)
                         buffered = io.BytesIO()
                         if chunk_img.mode in ("RGBA", "P"):
                             chunk_img = chunk_img.convert("RGB")
-                        chunk_img.save(buffered, format="JPEG")
+                        chunk_img.save(buffered, format="JPEG", quality=85)
                         chunk_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                         items_to_scan.append({"type": "inline", "b64": chunk_b64, "mime": "image/jpeg"})
                 else:
@@ -182,7 +172,7 @@ Cấu trúc JSON bắt buộc:
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi xử lý ảnh: {e}"})
                 
-        # 3. FILE PDF (Chia thành từng trang bằng PyPDF2)
+        # 3. FILE PDF
         elif "application/pdf" in mime_type_lower:
             pdf_pages = split_pdf_base64_to_pages(clean_b64)
             for page_b64, p_mime in pdf_pages:
@@ -196,10 +186,30 @@ Cấu trúc JSON bắt buộc:
         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
 
     # ==========================================
-    # CƠ CHẾ XỬ LÝ ĐA LUỒNG (CONCURRENCY)
+    # CƠ CHẾ XỬ LÝ ĐA LUỒNG
     # ==========================================
     max_concurrent_tasks = 5  
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
+    
+    # KHIẾN GEMINI BẮT BUỘC TRẢ VỀ CHUẨN JSON VỚI SCHEMAS
+    json_schema = {
+        "type": "ARRAY",
+        "description": "Danh sách các đoạn văn bản trích xuất được. Chủ động chia nhỏ thành nhiều phần tử nếu tài liệu dài.",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "visual": {
+                    "type": "STRING",
+                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX."
+                },
+                "spoken": {
+                    "type": "STRING",
+                    "description": "Văn bản dịch thuần tiếng Việt để đọc TTS."
+                }
+            },
+            "required": ["visual", "spoken"]
+        }
+    }
     
     async def process_single_page(idx: int, item: dict, client: httpx.AsyncClient):
         async with semaphore:
@@ -227,44 +237,38 @@ Cấu trúc JSON bắt buộc:
                 "generationConfig": {
                     "temperature": 0.0, 
                     "maxOutputTokens": 8192,
-                    "responseMimeType": "application/json" 
+                    "responseMimeType": "application/json",
+                    "responseSchema": json_schema # Áp dụng khuôn mẫu cấu trúc nghiêm ngặt
                 }
             }
             
             try:
-                # Tăng timeout cho từng tác vụ riêng lẻ
                 resp = await client.post(url, json=payload, timeout=120.0)
                 if resp.status_code != 200:
-                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini báo lỗi: {resp.text}")
-                    return [] # Trả về mảng rỗng để không làm hỏng toàn bộ tiến trình
+                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini API lỗi: {resp.text}")
+                    return []
                     
                 data = resp.json()
                 candidate = data.get("candidates", [])[0]
                 raw_result = candidate["content"]["parts"][0]["text"].strip()
                 
-                # Cứu vãn JSON
-                raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
-                if not raw_result.endswith("]"):
-                    last_brace = raw_result.rfind("}")
-                    if last_brace != -1:
-                        raw_result = raw_result[:last_brace + 1] + "]"
-                        
-                parsed_json = json.loads(raw_result, strict=False)
-                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất {len(parsed_json)} đoạn.")
+                # Chuyển đổi trực tiếp vì JSON chắc chắn chuẩn 100%
+                parsed_json = json.loads(raw_result)
+                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất được {len(parsed_json)} đoạn.")
                 return parsed_json
+            except json.JSONDecodeError as json_err:
+                print(f"[LỖI HỆ THỐNG TÁC VỤ {idx + 1}] Phản hồi không phải JSON hợp lệ: {json_err}")
+                return []
             except Exception as e:
-                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc parse JSON: {e}")
+                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc thực thi: {e}")
                 return []
 
-    # Chạy toàn bộ các tác vụ song song
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
         tasks = [
             process_single_page(idx, item, client) 
             for idx, item in enumerate(items_to_scan)
         ]
-        
-        # Hàm gather sẽ đợi tất cả các trang quét xong
         results = await asyncio.gather(*tasks)
 
     # ==========================================
