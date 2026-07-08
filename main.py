@@ -111,7 +111,6 @@ Cấu trúc JSON bắt buộc:
 
     parts = []
     if req.fileBase64 and req.mimeType:
-        # VÁ LỖI TẠI ĐÂY: Dùng split(",") thay vì regex để không bao giờ bị lỗi do MIME type dài
         if "," in req.fileBase64:
             clean_b64 = req.fileBase64.split(",", 1)[1]
         else:
@@ -136,7 +135,7 @@ Cấu trúc JSON bắt buộc:
                 parts.append({"text": f"Nội dung file tài liệu Word được cung cấp:\n{extracted_text}"})
             except Exception as e:
                 print(f"[ERROR] Lỗi đọc file Word: {e}")
-                return JSONResponse(status_code=400, content={"error": f"Lỗi đọc file Word. Hãy chắc chắn đây là file định dạng .docx (đời mới), không hỗ trợ file .doc cũ. Chi tiết: {str(e)}"})
+                return JSONResponse(status_code=400, content={"error": f"Lỗi đọc file Word. Hãy chắc chắn đây là file định dạng .docx (đời mới). Chi tiết: {str(e)}"})
         else:
             # Nếu là PDF/Ảnh thì gửi file vào inlineData cho Gemini tự đọc
             parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
@@ -155,16 +154,17 @@ Cấu trúc JSON bắt buộc:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
         ],
         "generationConfig": {
-            "temperature": 0.2,  # ÉP NHIỆT ĐỘ VỀ 0.0 ĐỂ KHÔNG ĐƯỢC TỰ BỊA CHỮ
+            "temperature": 0.2, 
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json" 
         }
     }
 
+    # FIX: Tăng timeout lên 120s để xử lý file lớn
     async with httpx.AsyncClient(trust_env=False) as client:
         try:
             print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
-            response = await client.post(url, json=payload, timeout=60.0)
+            response = await client.post(url, json=payload, timeout=120.0)
             
             if response.status_code != 200:
                 print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code}")
@@ -181,8 +181,15 @@ Cấu trúc JSON bắt buộc:
 
             raw_result = candidate["content"]["parts"][0]["text"].strip()
             
-            # Vá luôn lỗi AI thỉnh thoảng dư dấu phẩy ở cuối mảng JSON
+            # FIX: Vá lỗi JSON bị dư dấu phẩy
             raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
+            
+            # FIX: Thuật toán tự động cứu vãn chuỗi JSON bị đứt đoạn do file quá dài
+            if not raw_result.endswith("]"):
+                print("[WARNING] Chuỗi JSON bị cắt ngang. Đang cố gắng khôi phục dữ liệu...")
+                last_brace_index = raw_result.rfind("}")
+                if last_brace_index != -1:
+                    raw_result = raw_result[:last_brace_index + 1] + "]"
             
             try:
                 parsed_json = json.loads(raw_result, strict=False)
@@ -190,11 +197,17 @@ Cấu trúc JSON bắt buộc:
                 return {"result": parsed_json} 
             except json.JSONDecodeError as e:
                 print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
-                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
+                # Trả về lỗi 413 (Payload Too Large) để Frontend báo người dùng cắt file
+                return JSONResponse(
+                    status_code=413, 
+                    content={
+                        "error": "Tài liệu quá dài, AI không thể xử lý hết trong một lần (Lỗi JSON cắt ngang). Vui lòng cắt nhỏ file (ví dụ: tải lên từng phần) và thử lại."
+                    }
+                )
             
         except httpx.ReadTimeout:
-            print("[TIMEOUT] Quá thời gian 60 giây.")
-            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi (60 giây)."})
+            print("[TIMEOUT] Quá thời gian 120 giây.")
+            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi (120 giây). Hãy thử cắt nhỏ tài liệu."})
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Lỗi nội bộ: {str(e)}"})
 
@@ -204,7 +217,6 @@ Cấu trúc JSON bắt buộc:
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     target_url = "https://translate.googleapis.com/translate_tts"
-    # Dùng params để HTTPX tự động xử lý dấu cách, chống lỗi sập server
     params = {
         "client": "gtx",
         "ie": "UTF-8",
@@ -240,7 +252,6 @@ async def bulk_tts(req: BulkTTSRequest):
             if not text or not text.strip():
                 continue
             
-            # Dùng params để chống lỗi
             params = {
                 "client": "gtx",
                 "ie": "UTF-8",
