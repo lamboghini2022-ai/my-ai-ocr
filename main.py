@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from gtts import gTTS  # Thư viện TTS mới để chống lỗi âm thanh rỗng
+import edge_tts  # Thư viện TTS xịn sò mới, đọc tức thì!
 
 from PIL import Image
 
@@ -55,7 +55,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Async) đang chạy!",
+        "message": "Backend OCR Reader (Async) đang chạy cực mượt!",
     })
 
 class ExtractRequest(BaseModel):
@@ -219,7 +219,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 }
             }
             
-            # --- CƠ CHẾ BẢO VỆ LỖI 429/500 ---
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -274,34 +273,34 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             final_merged_json.extend(res_array)
             
     if not final_merged_json:
-        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang quá tải (Lỗi 429) hoặc file quá phức tạp. Vui lòng đợi 1 phút và thử lại."})
+        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang bận. Vui lòng thử lại."})
 
     return {"result": final_merged_json}
 
 
-# ==========================================
-# PHẦN TTS MỚI DÙNG gTTS (CHỐNG LỖI FILE RỖNG)
-# ==========================================
+# ==============================================================
+# HỆ THỐNG TTS MỚI: ĐỌC TỨC THÌ BẰNG EDGE-TTS (STREAMING NATIVE)
+# ==============================================================
 
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
 
-    try:
-        def create_audio():
-            tts = gTTS(text=text, lang=lang)
-            fp = io.BytesIO()
-            tts.write_to_fp(fp)
-            fp.seek(0)
-            return fp
+    # Giọng nữ Hoài My rất mượt cho tiếng Việt, giọng Aria cho tiếng Anh
+    voice = "vi-VN-HoaiMyNeural" if "vi" in lang.lower() else "en-US-AriaNeural"
 
-        audio_data = await asyncio.to_thread(create_audio)
-        return StreamingResponse(audio_data, media_type="audio/mpeg")
-        
-    except Exception as e:
-        print(f"Lỗi TTS: {e}")
-        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo âm thanh: {str(e)}"})
+    async def stream_audio():
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            # Phát sinh âm thanh tới đâu (yield), Frontend sẽ nhận và đọc ngay tới đó
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
+        except Exception as e:
+            print(f"Lỗi Edge TTS: {e}")
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
 
 class BulkTTSRequest(BaseModel):
@@ -311,30 +310,27 @@ class BulkTTSRequest(BaseModel):
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     if not req.texts:
-        return JSONResponse(status_code=400, content={"error": "Danh sách văn bản rỗng."})
+        return JSONResponse(status_code=400, content={"error": "Danh sách rỗng."})
 
-    try:
-        def create_bulk_audio():
-            combined = io.BytesIO()
+    voice = "vi-VN-HoaiMyNeural" if "vi" in req.lang.lower() else "en-US-AriaNeural"
+
+    async def stream_bulk_audio():
+        try:
             for text in req.texts:
-                if not text or not text.strip(): 
+                if not text or not text.strip():
                     continue
-                tts = gTTS(text=text.strip(), lang=req.lang)
-                tts.write_to_fp(combined)
-                
-            combined.seek(0)
-            return combined
+                communicate = edge_tts.Communicate(text.strip(), voice)
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        yield chunk["data"]
+        except Exception as e:
+            print(f"Lỗi Bulk TTS: {e}")
 
-        audio_data = await asyncio.to_thread(create_bulk_audio)
-        return StreamingResponse(
-            audio_data, 
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
-        )
-        
-    except Exception as e:
-        print(f"Lỗi Bulk TTS: {e}")
-        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo audio hàng loạt: {str(e)}"})
+    return StreamingResponse(
+        stream_bulk_audio(), 
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
+    )
 
 if __name__ == "__main__":
     import uvicorn
