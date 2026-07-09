@@ -218,29 +218,49 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 }
             }
             
-            try:
-                resp = await client.post(url, json=payload, timeout=120.0)
-                if resp.status_code != 200:
-                    return []
-                    
-                data = resp.json()
-                candidate = data.get("candidates", [])[0]
-                raw_result = candidate["content"]["parts"][0]["text"].strip()
-                
-                parsed_json = json.loads(raw_result)
-                return parsed_json
-            except json.JSONDecodeError:
+            # --- PHẦN ĐƯỢC FIX ---
+            # Thêm vòng lặp thử lại (Retry) tối đa 3 lần nếu Gemini báo lỗi 429 hoặc lỗi mạng
+            max_retries = 3
+            for attempt in range(max_retries):
                 try:
-                    last_brace = raw_result.rfind('}')
-                    if last_brace != -1:
-                        fixed_raw = raw_result[:last_brace+1] + ']'
-                        parsed_json = json.loads(fixed_raw)
-                        return parsed_json
-                except Exception:
-                    pass
-                return []
-            except Exception:
-                return []
+                    resp = await client.post(url, json=payload, timeout=120.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidate = data.get("candidates", [])[0]
+                        raw_result = candidate["content"]["parts"][0]["text"].strip()
+                        
+                        try:
+                            parsed_json = json.loads(raw_result)
+                            return parsed_json
+                        except json.JSONDecodeError:
+                            try:
+                                last_brace = raw_result.rfind('}')
+                                if last_brace != -1:
+                                    fixed_raw = raw_result[:last_brace+1] + ']'
+                                    parsed_json = json.loads(fixed_raw)
+                                    return parsed_json
+                            except Exception:
+                                pass
+                            return []
+                            
+                    elif resp.status_code in [429, 503]:
+                        # Bị Rate Limit (429) hoặc sập server (503): Đợi 2s, 4s rồi thử lại
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** (attempt + 1))
+                            continue
+                        return []
+                    else:
+                        print(f"Lỗi API Gemini - Mã: {resp.status_code}")
+                        return []
+                        
+                except Exception as e:
+                    print(f"Lỗi kết nối Gemini: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** (attempt + 1))
+                        continue
+                    return []
+            return []
+            # --- HẾT PHẦN FIX ---
 
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
@@ -256,7 +276,8 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             final_merged_json.extend(res_array)
             
     if not final_merged_json:
-        return JSONResponse(status_code=500, content={"error": "OCR thất bại trên tất cả các trang. Vui lòng thử lại."})
+        # Nếu đã thử lại nhiều lần mà vẫn rớt mạng hết, báo lỗi lịch sự thay vì crash ngầm
+        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang quá tải (Lỗi 429) hoặc file quá phức tạp. Vui lòng đợi 1 phút và thử lại."})
 
     return {"result": final_merged_json}
 
@@ -313,11 +334,17 @@ async def bulk_tts(req: BulkTTSRequest):
                     resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
                     if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
                         combined_audio.extend(resp.content)
+                        
+                    # --- PHẦN ĐƯỢC FIX ---
+                    # Google TTS rất hay quăng lỗi 429, phải cho delay nhẹ 0.3s giữa mỗi câu để không bị chặn
+                    await asyncio.sleep(0.3)
+                    # --- HẾT PHẦN FIX ---
+                    
                 except Exception:
                     pass
                 
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tải audio."})
+        return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ Google TTS (Có thể đã bị chặn 429)."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
