@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 httpx
-pydantic
-python-dotenv
+Pillow
 python-docx
-pip install PyPDF2 Pillow
+PyPDF2
+python-dotenv
