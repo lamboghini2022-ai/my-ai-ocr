@@ -5,8 +5,7 @@ import re
 import io
 import base64
 import asyncio
-import textwrap
-import hashlib # Thêm thư viện để tạo cache
+import hashlib  # Thêm thư viện để tạo cache
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -59,7 +58,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Async) đang chạy cực mượt!",
+        "message": "Backend OCR Reader (Async) với Edge TTS Caching đang chạy cực mượt!",
     })
 
 class ExtractRequest(BaseModel):
@@ -106,7 +105,6 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # Đã sửa lại PROMPT để ép buộc cách dòng bằng \n\n, giúp hiển thị không bị dính chữ
     PROMPT_TEXT = r"""
 Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
 
@@ -121,10 +119,10 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
 
 🚨 QUY TẮC "spoken" (Đọc TTS):
 - Dịch hoàn toàn ra tiếng Việt trơn (vd: $v$ -> "vận tốc", $\frac{1}{2}$ -> "một phần hai").
-- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn.
-🚫 QUY TẮC XỬ LÝ KHOẢNG TRỐNG ĐIỀN TỪ (DẤU CHẤM/GẠCH DƯỚI):\n
-- Đối với các dòng dấu chấm (.........) hoặc nét đứt trong ảnh gốc: BẮT BUỘC CHUYỂN ĐỔI TOÀN BỘ THÀNH DẤU GẠCH DƯỚI (_________).\n
-- Hãy xuất ra một dải gạch dưới dài tương đối (khoảng từ 10 đến 30 dấu gạch). TUYỆT ĐỐI KHÔNG được lặp vô tận gây lỗi.\n\n
+- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn trung bình vừa phải để người dùng dễ theo dõi luồng đọc.
+🚫 QUY TẮC XỬ LÝ KHOẢNG TRỐNG ĐIỀN TỪ (DẤU CHẤM/GẠCH DƯỚI):
+- Đối với các dòng dấu chấm (.........) hoặc nét đứt trong ảnh gốc: BẮT BUỘC CHUYỂN ĐỔI TOÀN BỘ THÀNH DẤU GẠCH DƯỚI (_________).
+- Hãy xuất ra một dải gạch dưới dài tương đối (khoảng từ 10 đến 30 dấu gạch). TUYỆT ĐỐI KHÔNG được lặp vô tận gây lỗi.
     """
 
     items_to_scan = [] 
@@ -138,10 +136,8 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 return JSONResponse(status_code=500, content={"error": "Thiếu thư viện python-docx."})
             try:
                 doc = Document(io.BytesIO(base64.b64decode(clean_b64)))
-                # Đã sửa \n thành \n\n để hiển thị đẹp hơn
                 extracted_text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
                 
-                # Giảm chunk từ 3000 xuống 1500 để load nhanh hơn, tránh timeout
                 CHUNK_SIZE = 1500 
                 for i in range(0, len(extracted_text), CHUNK_SIZE):
                     items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+CHUNK_SIZE]}"})
@@ -153,13 +149,12 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
                 width, height = img.size
                 
-                # Khắc phục lỗi số 2: Resize nếu ảnh quá rộng và chia nhỏ MAX_HEIGHT gắt hơn
                 if width > 1500:
                     ratio = 1500 / width
                     img = img.resize((1500, int(height * ratio)), Image.Resampling.LANCZOS)
                     width, height = img.size
 
-                MAX_HEIGHT = 600  # Giảm từ 1000 xuống 600 để chia nhỏ hơn nữa
+                MAX_HEIGHT = 600  
                 
                 if height > MAX_HEIGHT:
                     for i in range(0, height, MAX_HEIGHT):
@@ -185,7 +180,7 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
 
     if req.rawText:
-        CHUNK_SIZE = 1500 # Giảm từ 3000 xuống 1500
+        CHUNK_SIZE = 1500 
         for i in range(0, len(req.rawText), CHUNK_SIZE):
             items_to_scan.append({"type": "text", "content": req.rawText[i:i+CHUNK_SIZE]})
 
@@ -300,12 +295,11 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
 
 
 # ==============================================================
-# HỆ THỐNG TTS: ĐÃ TÍCH HỢP CACHING ĐỂ KHÔNG PHẢI GỌI LẠI SERVER
-# Bỏ route trùng lặp, dùng bản tốt nhất
+# HỆ THỐNG TTS: TÍCH HỢP CACHING EDGE TTS CHO CẢ SINGLE VÀ BULK ROUTE
 # ==============================================================
 
 def clean_ssml_chars(text: str) -> str:
-    """Loại bỏ ký tự gây sập nguồn hệ thống Edge-TTS"""
+    """Loại bỏ ký tự gây lỗi cú pháp hệ thống Edge-TTS"""
     if not text:
         return ""
     return text.replace("&", " và ").replace("<", " ").replace(">", " ").replace("#", " ")
@@ -318,11 +312,11 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     voice = "vi-VN-HoaiMyNeural" if "vi" in lang.lower() else "en-US-AriaNeural"
     clean_text = clean_ssml_chars(text.strip())
 
-    # Khắc phục lỗi số 1: Caching Audio bằng Hash
+    # Caching Audio bằng Hash MD5
     text_hash = hashlib.md5(f"{clean_text}_{voice}".encode('utf-8')).hexdigest()
     cache_path = os.path.join("tts_cache", f"{text_hash}.mp3")
 
-    # Nếu đã từng sinh audio này, trả về ngay lập tức (Không tốn tgian load)
+    # Nếu tồn tại cache, trả về FileResponse ngay lập tức
     if os.path.exists(cache_path):
         return FileResponse(cache_path, media_type="audio/mpeg")
 
@@ -334,19 +328,19 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
             if chunk["type"] == "audio":
                 audio_data.extend(chunk["data"])
                 
-        # Lưu lại cache cho lần sau
         with open(cache_path, "wb") as f:
             f.write(audio_data)
 
         return Response(content=bytes(audio_data), media_type="audio/mpeg")
         
     except Exception as e:
-        print(f"Lỗi Edge TTS: {e}")
+        print(f"Lỗi Edge TTS Single: {e}")
         return JSONResponse(status_code=500, content={"error": f"Lỗi âm thanh: {str(e)}"})
 
-# ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT 
-# ==========================================
+
+# ==============================================================
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT (ĐÃ ĐỒNG BỘ SANG EDGE-TTS + SMART CHUNKING)
+# ==============================================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
     lang: str = "vi"
@@ -354,26 +348,77 @@ class BulkTTSRequest(BaseModel):
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    voice = "vi-VN-HoaiMyNeural" if "vi" in req.lang.lower() else "en-US-AriaNeural"
     combined_audio = bytearray()
     
-    async with httpx.AsyncClient() as client:
-        for text in req.texts:
-            if not text or not text.strip():
-                continue
-            
-            # Có thể bổ sung cơ chế cache tại đây nếu muốn, 
-            # nhưng tạm giữ nguyên luồng Google TTS Bulk theo cấu trúc gốc.
-            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+    # 3.1 SMART CHUNKING: Gộp các câu quá ngắn lại để đọc một mạch, giảm ngắt quãng vô duyên
+    optimized_chunks = []
+    current_chunk = ""
+    for text in req.texts:
+        text = text.strip()
+        if not text:
+            continue
+        # Giới hạn gom nhóm lý tưởng khoảng 350 ký tự (~1 đoạn văn ngắn mượt mà)
+        if len(current_chunk) + len(text) < 350:
+            current_chunk += " " + text if current_chunk else text
+        else:
+            if current_chunk:
+                optimized_chunks.append(current_chunk)
+            current_chunk = text
+    if current_chunk:
+        optimized_chunks.append(current_chunk)
+        
+    print(f"[INFO] Đã gom nhóm thông minh. Số khối tải thực tế giảm xuống còn: {len(optimized_chunks)}")
+
+    # 3.2 DUYỆT TỪNG KHỐI - TẬN DỤNG CACHE TRƯỚC, SINH MỚI NẾU THIẾU
+    for index, chunk in enumerate(optimized_chunks):
+        clean_chunk = clean_ssml_chars(chunk)
+        
+        # Tạo hash kiểm tra bộ đệm
+        chunk_hash = hashlib.md5(f"{clean_chunk}_{voice}".encode('utf-8')).hexdigest()
+        cache_path = os.path.join("tts_cache", f"{chunk_hash}.mp3")
+        
+        if os.path.exists(cache_path):
+            # Nếu có sẵn cache, đọc trực tiếp từ Disk, bỏ qua gọi API
             try:
-                resp = await client.get(target_url, headers=headers, timeout=15.0)
-                if resp.status_code == 200:
-                    combined_audio.extend(resp.content)
-            except Exception as e:
-                print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
+                with open(cache_path, "rb") as f:
+                    combined_audio.extend(f.read())
+                continue
+            except Exception as cache_err:
+                print(f"[WARN] Lỗi đọc file cache tại khối {index}: {cache_err}")
+        
+        # Nếu chưa có cache, tiến hành gọi Edge TTS với cơ chế tự động thử lại (Retry)
+        max_retries = 3
+        success = False
+        
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(clean_chunk, voice)
+                temp_audio = bytearray()
                 
+                async for chunk_data in communicate.stream():
+                    if chunk_data["type"] == "audio":
+                        temp_audio.extend(chunk_data["data"])
+                
+                if temp_audio:
+                    # Ghi đè vào danh sách chính và lưu ngược lại ổ cứng để làm cache
+                    combined_audio.extend(temp_audio)
+                    with open(cache_path, "wb") as f:
+                        f.write(temp_audio)
+                    success = True
+                    break
+            except Exception as e:
+                print(f"[LỖI EDGE TTS BULK] Lần thử {attempt + 1}/{max_retries} tại khối {index}: {e}")
+                await asyncio.sleep(1.0) # Nghỉ 1 giây trước khi thử lại
+                
+        if not success:
+            print(f"[THẤT BẠI] Không thể tải khối {index}: {clean_chunk[:40]}...")
+            
+        # Thêm một khoảng nghỉ siêu ngắn 0.1s giữa các đợt request sống để tránh kích hoạt bảo vệ hệ thống
+        await asyncio.sleep(0.1)
+
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ server TTS."})
+        return JSONResponse(status_code=500, content={"error": "Không thể tổng hợp dữ liệu âm thanh từ Edge TTS."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
