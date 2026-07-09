@@ -1,8 +1,7 @@
 fastapi
 uvicorn
 httpx
+pydantic
+gTTS
 pillow
-python-docx
-pypdf2
-python-dotenv
-pip install gTTS
+python-multipart
