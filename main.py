@@ -13,9 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-# ---------------------------------------------------------
-# IMPORT CÁC THƯ VIỆN XỬ LÝ ẢNH & FILE
-# ---------------------------------------------------------
 from PIL import Image
 
 DOCX_AVAILABLE = False
@@ -23,14 +20,14 @@ try:
     from docx import Document
     DOCX_AVAILABLE = True
 except ImportError:
-    print("[WARNING] Chưa cài python-docx.")
+    pass
 
 PYPDF_AVAILABLE = False
 try:
     import PyPDF2
     PYPDF_AVAILABLE = True
 except ImportError:
-    print("[WARNING] Chưa cài PyPDF2. PDF sẽ không được chia trang.")
+    pass
 
 try:
     from dotenv import load_dotenv
@@ -65,12 +62,8 @@ class ExtractRequest(BaseModel):
     mimeType: Optional[str] = None
     rawText: Optional[str] = None
 
-# ==========================================
-# THUẬT TOÁN HỖ TRỢ: CHIA NHỎ PDF THÀNH TỪNG TRANG
-# ==========================================
 def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
     if not PYPDF_AVAILABLE:
-        print("[WARNING] Không có PyPDF2, sẽ gửi nguyên file PDF.")
         return [(pdf_b64, "application/pdf")]
         
     try:
@@ -79,7 +72,6 @@ def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
         
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(pdf_reader.pages)
-        print(f"[INFO] Phát hiện tệp PDF. Tổng số trang: {total_pages}")
         
         pages_b64_list = []
         for i in range(total_pages):
@@ -98,16 +90,10 @@ def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
             
         return pages_b64_list
     except Exception as e:
-        print(f"[ERROR] Lỗi phân tách trang PDF: {str(e)}")
         return [(pdf_b64, "application/pdf")]
 
-# ==========================================
-# 1. API XỬ LÝ OCR (HỖ TRỢ ĐA LUỒNG - CONCURRENCY)
-# ==========================================
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR (ASYNC) ==========")
-    
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return JSONResponse(status_code=500, content={"error": "Chưa cấu hình GEMINI_API_KEY."})
@@ -116,37 +102,19 @@ async def extract_text(req: ExtractRequest):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
+Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
 
-🚨 QUY TẮC CHỐNG TRÀN TOKEN VÀ CẮT NGANG JSON (QUAN TRỌNG NHẤT):
-- TUYỆT ĐỐI KHÔNG dồn toàn bộ văn bản quét được vào duy nhất một object.
-- Hãy CHIA NHỎ nội dung ra thành NHIỀU phẩn tử (object) trong mảng JSON. 
-- Cứ sau khoảng 2-4 câu văn, hoặc sau khi quét xong MỘT CÂU HỎI (đối với đề trắc nghiệm), bạn BẮT BUỘC phải đóng object đó lại và mở một object mới.
+🚨 QUY TẮC SỐNG CÒN:
+- BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG giải bài tập.
+- Chia nhỏ nội dung ra làm nhiều phần tử. Cứ xong 2-3 câu văn, hoặc 1 câu hỏi trắc nghiệm thì tạo một object mới.
 
-Cấu trúc JSON bắt buộc:
-[
-  {
-    "visual": "Câu 1: Tính vận tốc của vật...",
-    "spoken": "Câu một: Tính vận tốc của vật..."
-  },
-  {
-    "visual": "Câu 2: Cho hàm số bậc hai...",
-    "spoken": "Câu hai: Cho hàm số bậc hai..."
-  }
-]
+📐 QUY TẮC "visual" (Nội dung gốc):
+- KHÔNG DÙNG THẺ HTML. Dùng `\n\n` để ngắt đoạn.
+- Công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. Inline: bọc bằng `$`. Block: bọc bằng `$$`.
 
-🚨 QUY TẮC SỐNG CÒN KHÁC:
-- TUYỆT ĐỐI BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG tự giải bài tập.
-- Chỉ làm nhiệm vụ của một máy đọc (OCR) thuần túy.
-
-📐 QUY TẮC CHO "visual":
-- KHÔNG DÙNG THẺ HTML. Dùng ký tự ngắt dòng `\n\n` để chia đoạn nếu cần.
-- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. (Nhân đôi dấu gạch chéo ngược: `\\frac{a}{b}`).
-- Inline: Bọc bằng `$`. Block: Bọc bằng `$$`.
-
-🚨 QUY TẮC CHO "spoken" (ĐỂ ĐỌC TTS):
-- Chia câu ngắn (1-2 câu). KHÔNG chứa LaTeX, dịch ra tiếng Việt trơn hoàn toàn (Ví dụ: $v$ thành "vận tốc", $\frac{1}{2}$ thành "một phần hai").
-- Chỉ chứa chữ cái, số và dấu câu cơ bản.
+🚨 QUY TẮC "spoken" (Đọc TTS):
+- Dịch hoàn toàn ra tiếng Việt trơn (vd: $v$ -> "vận tốc", $\frac{1}{2}$ -> "một phần hai").
+- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn.
     """
 
     items_to_scan = [] 
@@ -155,26 +123,24 @@ Cấu trúc JSON bắt buộc:
         clean_b64 = req.fileBase64.split(",", 1)[1] if "," in req.fileBase64 else req.fileBase64
         mime_type_lower = req.mimeType.lower()
         
-        # 1. FILE WORD
         if "wordprocessingml.document" in mime_type_lower or "msword" in mime_type_lower:
             if not DOCX_AVAILABLE:
                 return JSONResponse(status_code=500, content={"error": "Thiếu thư viện python-docx."})
             try:
                 doc = Document(io.BytesIO(base64.b64decode(clean_b64)))
                 extracted_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text}"})
+                for i in range(0, len(extracted_text), 3000):
+                    items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+3000]}"})
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
                 
-        # 2. FILE ẢNH 
         elif mime_type_lower.startswith("image/"):
             try:
                 img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
                 width, height = img.size
-                MAX_HEIGHT = 2000
+                MAX_HEIGHT = 1000  
                 
                 if height > MAX_HEIGHT:
-                    print(f"[INFO] Ảnh quá dài ({height}px). Tiến hành chia mảnh nhỏ ({MAX_HEIGHT}px)...")
                     for i in range(0, height, MAX_HEIGHT):
                         box = (0, i, width, min(i + MAX_HEIGHT, height))
                         chunk_img = img.crop(box)
@@ -189,50 +155,50 @@ Cấu trúc JSON bắt buộc:
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi xử lý ảnh: {e}"})
                 
-        # 3. FILE PDF
         elif "application/pdf" in mime_type_lower:
             pdf_pages = split_pdf_base64_to_pages(clean_b64)
             for page_b64, p_mime in pdf_pages:
                 items_to_scan.append({"type": "inline", "b64": page_b64, "mime": p_mime})
                 
-        # 4. ĐỊNH DẠNG KHÁC
         else:
             items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
 
-    if not items_to_scan and not req.rawText:
+    if req.rawText:
+        for i in range(0, len(req.rawText), 3000):
+            items_to_scan.append({"type": "text", "content": req.rawText[i:i+3000]})
+
+    if not items_to_scan:
         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
 
-    # ==========================================
-    # CƠ CHẾ XỬ LÝ ĐA LUỒNG (CONCURRENCY)
-    # ==========================================
     max_concurrent_tasks = 5  
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
     
-    # ĐỊNH NGHĨA KHUÔN MẪU ĐẦU RA - GIẢI QUYẾT TRIỆT ĐỂ LỖI CÚ PHÁP
     json_schema = {
         "type": "ARRAY",
+        "description": "Danh sách các đoạn văn bản trích xuất được.",
         "items": {
             "type": "OBJECT",
             "properties": {
-                "visual": {"type": "STRING"},
-                "spoken": {"type": "STRING"}
+                "visual": {
+                    "type": "STRING",
+                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX."
+                },
+                "spoken": {
+                    "type": "STRING",
+                    "description": "Văn bản dịch thuần tiếng Việt để đọc TTS."
+                }
             },
             "required": ["visual", "spoken"]
         }
     }
-
+    
     async def process_single_page(idx: int, item: dict, client: httpx.AsyncClient):
         async with semaphore:
-            print(f"[INFO] Đang thực thi OCR tác vụ {idx + 1}/{len(items_to_scan)}...")
-            
             parts = []
             if item["type"] == "text":
                 parts.append({"text": item["content"]})
             else:
                 parts.append({"inlineData": {"mimeType": item["mime"], "data": item["b64"]}})
-                
-            if req.rawText:
-                parts.append({"text": req.rawText})
                 
             parts.append({"text": PROMPT_TEXT})
             
@@ -248,30 +214,36 @@ Cấu trúc JSON bắt buộc:
                     "temperature": 0.0, 
                     "maxOutputTokens": 8192,
                     "responseMimeType": "application/json",
-                    "responseSchema": json_schema # <-- NẠP KHUÔN MẪU VÀO ĐÂY
+                    "responseSchema": json_schema
                 }
             }
             
             try:
                 resp = await client.post(url, json=payload, timeout=120.0)
                 if resp.status_code != 200:
-                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini báo lỗi: {resp.text}")
                     return []
                     
                 data = resp.json()
                 candidate = data.get("candidates", [])[0]
                 raw_result = candidate["content"]["parts"][0]["text"].strip()
                 
-                # BỎ HOÀN TOÀN REGEX CỨU VỚT Ở ĐÂY VÀ PARSE TRỰC TIẾP
-                parsed_json = json.loads(raw_result, strict=False)
-                
-                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất được {len(parsed_json)} đoạn văn bản hợp lệ.")
+                parsed_json = json.loads(raw_result)
                 return parsed_json
-            except Exception as e:
-                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc không thể khắc phục JSON: {e}")
+            except json.JSONDecodeError:
+                print("[WARNING] Chuỗi JSON bị cắt ngang. Đang cố gắng khôi phục dữ liệu...")
+                try:
+                    last_brace = raw_result.rfind('}')
+                    if last_brace != -1:
+                        fixed_raw = raw_result[:last_brace+1] + ']'
+                        parsed_json = json.loads(fixed_raw)
+                        print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
+                        return parsed_json
+                except Exception:
+                    pass
+                return []
+            except Exception:
                 return []
 
-    # Chạy toàn bộ các tác vụ song song
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
         tasks = [
@@ -280,9 +252,6 @@ Cấu trúc JSON bắt buộc:
         ]
         results = await asyncio.gather(*tasks)
 
-    # ==========================================
-    # GỘP KẾT QUẢ VÀ TRẢ VỀ FRONTEND
-    # ==========================================
     final_merged_json = []
     for res_array in results:
         if isinstance(res_array, list):
@@ -291,13 +260,8 @@ Cấu trúc JSON bắt buộc:
     if not final_merged_json:
         return JSONResponse(status_code=500, content={"error": "OCR thất bại trên tất cả các trang. Vui lòng thử lại."})
 
-    print(f"\n[HOÀN TẤT] Tổng cộng đã quét thành công {len(final_merged_json)} đoạn OCR.")
     return {"result": final_merged_json}
 
-
-# ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
-# ==========================================
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
@@ -316,22 +280,17 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
                         if r.status_code == 200:
                             async for data in r.aiter_bytes():
                                 yield data
-                except Exception as e:
-                    print(f"[TTS STREAM ERROR]: {e}")
+                except Exception:
+                    pass
 
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
-
-# ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT (AUDIOBOOK)
-# ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
     lang: str = "vi"
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0"}
     combined_audio = bytearray()
     target_url = "https://translate.googleapis.com/translate_tts"
@@ -347,8 +306,8 @@ async def bulk_tts(req: BulkTTSRequest):
                     resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
                     if resp.status_code == 200:
                         combined_audio.extend(resp.content)
-                except Exception as e:
-                    print(f"[WARNING] Bỏ qua đoạn lỗi mạng: {e}")
+                except Exception:
+                    pass
                 
     if not combined_audio:
         return JSONResponse(status_code=500, content={"error": "Không thể tải audio."})
@@ -358,7 +317,6 @@ async def bulk_tts(req: BulkTTSRequest):
         media_type="audio/mpeg",
         headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
     )
-
 
 if __name__ == "__main__":
     import uvicorn
