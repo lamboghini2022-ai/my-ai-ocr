@@ -58,7 +58,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Async) với Edge TTS Caching đang chạy cực mượt!",
+        "message": "Backend OCR Reader (Async) với Siêu Tốc Độ Edge TTS đang chạy!",
     })
 
 class ExtractRequest(BaseModel):
@@ -316,7 +316,6 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     text_hash = hashlib.md5(f"{clean_text}_{voice}".encode('utf-8')).hexdigest()
     cache_path = os.path.join("tts_cache", f"{text_hash}.mp3")
 
-    # Nếu tồn tại cache, trả về FileResponse ngay lập tức
     if os.path.exists(cache_path):
         return FileResponse(cache_path, media_type="audio/mpeg")
 
@@ -339,7 +338,41 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
 
 
 # ==============================================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT (ĐÃ ĐỒNG BỘ SANG EDGE-TTS + SMART CHUNKING)
+# HÀM BỔ TRỢ TẢI AUDIO SONG SONG CHO KÊNH BULK (GIẢM TỐI ĐA ĐỘ TRỄ)
+# ==============================================================
+async def download_single_chunk_async(semaphore, chunk, voice, cache_path):
+    """Xử lý bất đồng bộ tải một khối âm thanh độc lập có kèm Cache bảo vệ"""
+    async with semaphore:
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    return f.read()
+            except Exception:
+                pass
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(chunk, voice)
+                temp_audio = bytearray()
+                
+                async for chunk_data in communicate.stream():
+                    if chunk_data["type"] == "audio":
+                        temp_audio.extend(chunk_data["data"])
+                
+                if temp_audio:
+                    # Ghi file cache ngược lại ổ cứng
+                    with open(cache_path, "wb") as f:
+                        f.write(temp_audio)
+                    return bytes(temp_audio)
+            except Exception as e:
+                print(f"[RETRY] Lỗi tải khối (Lần {attempt + 1}): {e}")
+                await asyncio.sleep(0.5)
+        return b"" # Trả về mảng rỗng nếu lỗi toàn diện mảnh này
+
+
+# ==============================================================
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT (NÂNG CẤP: SONG SONG HÓA + SIÊU MƯỢT)
 # ==============================================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -347,19 +380,21 @@ class BulkTTSRequest(BaseModel):
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
+    print(f"\n========== TỔNG HỢP AUDIO HÀNG LOẠT ({len(req.texts)} dòng đầu vào) ==========")
     voice = "vi-VN-HoaiMyNeural" if "vi" in req.lang.lower() else "en-US-AriaNeural"
-    combined_audio = bytearray()
     
-    # 3.1 SMART CHUNKING: Gộp các câu quá ngắn lại để đọc một mạch, giảm ngắt quãng vô duyên
+    # 3.1 SMART CHUNKING CỰC ĐẠI: Nâng hẳn lên 2500 ký tự để AI đọc dài mạch lạc như sách nói thật
     optimized_chunks = []
     current_chunk = ""
     for text in req.texts:
         text = text.strip()
         if not text:
             continue
-        # Giới hạn gom nhóm lý tưởng khoảng 350 ký tự (~1 đoạn văn ngắn mượt mà)
-        if len(current_chunk) + len(text) < 350:
+        
+        # CHỐNG KHỰNG TIẾNG: Loại bỏ toàn bộ dấu xuống dòng \n thừa bừa bãi trong văn bản đọc nói
+        text = re.sub(r'\s+', ' ', text)
+        
+        if len(current_chunk) + len(text) < 2500: 
             current_chunk += " " + text if current_chunk else text
         else:
             if current_chunk:
@@ -368,58 +403,34 @@ async def bulk_tts(req: BulkTTSRequest):
     if current_chunk:
         optimized_chunks.append(current_chunk)
         
-    print(f"[INFO] Đã gom nhóm thông minh. Số khối tải thực tế giảm xuống còn: {len(optimized_chunks)}")
+    print(f"[INFO] Gom cụm thành công. Số request thực tế giảm xuống còn: {len(optimized_chunks)} khối lớn.")
 
-    # 3.2 DUYỆT TỪNG KHỐI - TẬN DỤNG CACHE TRƯỚC, SINH MỚI NẾU THIẾU
-    for index, chunk in enumerate(optimized_chunks):
+    # 3.2 THIẾT LẬP LUỒNG CONCURRENCY (CHẠY SONG SONG CÙNG LÚC)
+    # Giới hạn tối đa 5 luồng tải đồng thời để không bị Microsoft bóp băng thông
+    semaphore = asyncio.Semaphore(5)
+    tasks = []
+    
+    for chunk in optimized_chunks:
         clean_chunk = clean_ssml_chars(chunk)
-        
-        # Tạo hash kiểm tra bộ đệm
         chunk_hash = hashlib.md5(f"{clean_chunk}_{voice}".encode('utf-8')).hexdigest()
         cache_path = os.path.join("tts_cache", f"{chunk_hash}.mp3")
         
-        if os.path.exists(cache_path):
-            # Nếu có sẵn cache, đọc trực tiếp từ Disk, bỏ qua gọi API
-            try:
-                with open(cache_path, "rb") as f:
-                    combined_audio.extend(f.read())
-                continue
-            except Exception as cache_err:
-                print(f"[WARN] Lỗi đọc file cache tại khối {index}: {cache_err}")
+        # Đưa vào hàng chờ xử lý song song
+        tasks.append(download_single_chunk_async(semaphore, clean_chunk, voice, cache_path))
         
-        # Nếu chưa có cache, tiến hành gọi Edge TTS với cơ chế tự động thử lại (Retry)
-        max_retries = 3
-        success = False
-        
-        for attempt in range(max_retries):
-            try:
-                communicate = edge_tts.Communicate(clean_chunk, voice)
-                temp_audio = bytearray()
-                
-                async for chunk_data in communicate.stream():
-                    if chunk_data["type"] == "audio":
-                        temp_audio.extend(chunk_data["data"])
-                
-                if temp_audio:
-                    # Ghi đè vào danh sách chính và lưu ngược lại ổ cứng để làm cache
-                    combined_audio.extend(temp_audio)
-                    with open(cache_path, "wb") as f:
-                        f.write(temp_audio)
-                    success = True
-                    break
-            except Exception as e:
-                print(f"[LỖI EDGE TTS BULK] Lần thử {attempt + 1}/{max_retries} tại khối {index}: {e}")
-                await asyncio.sleep(1.0) # Nghỉ 1 giây trước khi thử lại
-                
-        if not success:
-            print(f"[THẤT BẠI] Không thể tải khối {index}: {clean_chunk[:40]}...")
+    # KÍCH HOẠT: Tải đồng loạt tất cả các khối văn bản cùng một lúc!
+    audio_results = await asyncio.gather(*tasks)
+    
+    # 3.3 GHÉP PHẢN HỒI THEO ĐÚNG THỨ TỰ BẢN GỐC
+    combined_audio = bytearray()
+    for audio_bytes in audio_results:
+        if audio_bytes:
+            combined_audio.extend(audio_bytes)
             
-        # Thêm một khoảng nghỉ siêu ngắn 0.1s giữa các đợt request sống để tránh kích hoạt bảo vệ hệ thống
-        await asyncio.sleep(0.1)
-
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tổng hợp dữ liệu âm thanh từ Edge TTS."})
+        return JSONResponse(status_code=500, content={"error": "Không thể kết xuất dữ liệu âm thanh từ Edge TTS."})
         
+    print(f"[SUCCESS] Đã kết xuất xong file MP3 tổng hợp dung lượng: {len(combined_audio)} bytes.")
     return StreamingResponse(
         io.BytesIO(combined_audio), 
         media_type="audio/mpeg",
