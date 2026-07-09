@@ -317,35 +317,52 @@ class BulkTTSRequest(BaseModel):
     texts: list[str]
     lang: str = "vi"
 
+@app.get("/api/tts")
+async def get_tts(text: str = Query(...), lang: str = "vi"):
+    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    async def stream_audio():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", target_url, headers=headers) as r:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+
+# ==========================================
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT 
+# ==========================================
+class BulkTTSRequest(BaseModel):
+    texts: list[str]
+    lang: str = "vi"
+
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    if not req.texts:
-        return JSONResponse(status_code=400, content={"error": "Danh sách rỗng."})
-
-    voice = "vi-VN-HoaiMyNeural" if "vi" in req.lang.lower() else "en-US-AriaNeural"
-
-    try:
-        combined_audio = bytearray()
+    print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    combined_audio = bytearray()
+    
+    async with httpx.AsyncClient() as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
+            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+            try:
+                resp = await client.get(target_url, headers=headers, timeout=15.0)
+                if resp.status_code == 200:
+                    combined_audio.extend(resp.content)
+            except Exception as e:
+                print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
                 
-            clean_text = clean_ssml_chars(text.strip())
-            communicate = edge_tts.Communicate(clean_text, voice)
-            
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    combined_audio.extend(chunk["data"])
-                    
-        return Response(
-            content=bytes(combined_audio), 
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
-        )
+    if not combined_audio:
+        return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ server TTS."})
         
-    except Exception as e:
-        print(f"Lỗi Bulk TTS: {e}")
-        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo audio hàng loạt: {str(e)}"})
+    return StreamingResponse(
+        io.BytesIO(combined_audio), 
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
+    )
 
 if __name__ == "__main__":
     import uvicorn
