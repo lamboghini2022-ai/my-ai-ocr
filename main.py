@@ -7,12 +7,12 @@ import base64
 import asyncio
 import textwrap
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import edge_tts  # Thư viện TTS xịn sò mới, đọc tức thì!
+import edge_tts  
 
 from PIL import Image
 
@@ -279,28 +279,38 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
 
 
 # ==============================================================
-# HỆ THỐNG TTS MỚI: ĐỌC TỨC THÌ BẰNG EDGE-TTS (STREAMING NATIVE)
+# HỆ THỐNG TTS MỚI: DỌN SẠCH KÝ TỰ CẤM VÀ ĐÓNG GÓI 1 FILE CHUẨN
 # ==============================================================
+
+def clean_ssml_chars(text: str) -> str:
+    """Loại bỏ ký tự gây sập nguồn hệ thống Edge-TTS"""
+    if not text:
+        return ""
+    return text.replace("&", " và ").replace("<", " ").replace(">", " ").replace("#", " ")
 
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
 
-    # Giọng nữ Hoài My rất mượt cho tiếng Việt, giọng Aria cho tiếng Anh
     voice = "vi-VN-HoaiMyNeural" if "vi" in lang.lower() else "en-US-AriaNeural"
+    clean_text = clean_ssml_chars(text.strip())
 
-    async def stream_audio():
-        try:
-            communicate = edge_tts.Communicate(text, voice)
-            # Phát sinh âm thanh tới đâu (yield), Frontend sẽ nhận và đọc ngay tới đó
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-        except Exception as e:
-            print(f"Lỗi Edge TTS: {e}")
-
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice)
+        audio_data = bytearray()
+        
+        # Gom toàn bộ âm thanh thành 1 cục duy nhất
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.extend(chunk["data"])
+                
+        # Trả về Response nguyên khối để trình duyệt biết độ dài, không tự tắt ngang
+        return Response(content=bytes(audio_data), media_type="audio/mpeg")
+        
+    except Exception as e:
+        print(f"Lỗi Edge TTS: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Lỗi âm thanh: {str(e)}"})
 
 
 class BulkTTSRequest(BaseModel):
@@ -314,23 +324,28 @@ async def bulk_tts(req: BulkTTSRequest):
 
     voice = "vi-VN-HoaiMyNeural" if "vi" in req.lang.lower() else "en-US-AriaNeural"
 
-    async def stream_bulk_audio():
-        try:
-            for text in req.texts:
-                if not text or not text.strip():
-                    continue
-                communicate = edge_tts.Communicate(text.strip(), voice)
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        yield chunk["data"]
-        except Exception as e:
-            print(f"Lỗi Bulk TTS: {e}")
-
-    return StreamingResponse(
-        stream_bulk_audio(), 
-        media_type="audio/mpeg",
-        headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
-    )
+    try:
+        combined_audio = bytearray()
+        for text in req.texts:
+            if not text or not text.strip():
+                continue
+                
+            clean_text = clean_ssml_chars(text.strip())
+            communicate = edge_tts.Communicate(clean_text, voice)
+            
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    combined_audio.extend(chunk["data"])
+                    
+        return Response(
+            content=bytes(combined_audio), 
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
+        )
+        
+    except Exception as e:
+        print(f"Lỗi Bulk TTS: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo audio hàng loạt: {str(e)}"})
 
 if __name__ == "__main__":
     import uvicorn
