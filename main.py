@@ -312,10 +312,54 @@ class BulkTTSRequest(BaseModel):
     texts: list[str]
     lang: str = "vi"
 
+@app.get("/api/tts")
+async def get_tts(text: str = Query(...), lang: str = "vi"):
+    if not text or not text.strip():
+        return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
+        
+    target_url = "https://translate.googleapis.com/translate_tts"
+    # Nâng cấp Header: Thêm Referer giả dạng đang dùng web Google Dịch thật
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://translate.google.com/"
+    }
+    text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
+    
+    async def stream_audio():
+        async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
+            for chunk in text_chunks:
+                if not chunk.strip():
+                    continue
+                params = {"client": "gtx", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
+                
+                # CƠ CHẾ SỐNG CÒN: Thử lại tối đa 3 lần nếu Google dở chứng chặn 429
+                for attempt in range(3):
+                    try:
+                        # Đổi từ stream sang get cho từng câu ngắn để tránh rớt gói tin
+                        resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                        if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
+                            yield resp.content
+                            break  # Thành công thì thoát vòng lặp thử lại
+                        elif resp.status_code == 429:
+                            await asyncio.sleep(1.5)  # Bị chặn thì ngoan ngoãn đợi 1.5 giây
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(1.5)
+                            
+                # Bắt buộc nghỉ 0.5 giây giữa các câu để né hệ thống quét spam của Google
+                await asyncio.sleep(0.5)
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+
+class BulkTTSRequest(BaseModel):
+    texts: list[str]
+    lang: str = "vi"
+
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://translate.google.com/"
     }
     combined_audio = bytearray()
     target_url = "https://translate.googleapis.com/translate_tts"
@@ -330,21 +374,25 @@ async def bulk_tts(req: BulkTTSRequest):
                 if not chunk.strip():
                     continue
                 params = {"client": "gtx", "ie": "UTF-8", "tl": req.lang, "q": chunk.strip()}
-                try:
-                    resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
-                    if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
-                        combined_audio.extend(resp.content)
-                        
-                    # --- PHẦN ĐƯỢC FIX ---
-                    # Google TTS rất hay quăng lỗi 429, phải cho delay nhẹ 0.3s giữa mỗi câu để không bị chặn
-                    await asyncio.sleep(0.3)
-                    # --- HẾT PHẦN FIX ---
-                    
-                except Exception:
-                    pass
+                
+                # CƠ CHẾ SỐNG CÒN TƯƠNG TỰ CHO BULK
+                for attempt in range(3):
+                    try:
+                        resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                        if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
+                            combined_audio.extend(resp.content)
+                            break
+                        elif resp.status_code == 429:
+                            await asyncio.sleep(1.5)
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(1.5)
+                            
+                # Bắt buộc nghỉ ngơi giữa các requests
+                await asyncio.sleep(0.5)
                 
     if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ Google TTS (Có thể đã bị chặn 429)."})
+        return JSONResponse(status_code=500, content={"error": "Google TTS đã chặn toàn bộ yêu cầu tải âm thanh (Lỗi 429). Vui lòng đợi vài phút rồi thử lại."})
         
     return StreamingResponse(
         io.BytesIO(combined_audio), 
