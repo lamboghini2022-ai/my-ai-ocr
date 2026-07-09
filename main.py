@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from gtts import gTTS  # Thư viện TTS mới để chống lỗi âm thanh rỗng
 
 from PIL import Image
 
@@ -218,8 +219,7 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 }
             }
             
-            # --- PHẦN ĐƯỢC FIX ---
-            # Thêm vòng lặp thử lại (Retry) tối đa 3 lần nếu Gemini báo lỗi 429 hoặc lỗi mạng
+            # --- CƠ CHẾ BẢO VỆ LỖI 429/500 ---
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -244,7 +244,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                             return []
                             
                     elif resp.status_code in [429, 503]:
-                        # Bị Rate Limit (429) hoặc sập server (503): Đợi 2s, 4s rồi thử lại
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** (attempt + 1))
                             continue
@@ -260,7 +259,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                         continue
                     return []
             return []
-            # --- HẾT PHẦN FIX ---
 
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
@@ -276,80 +274,35 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             final_merged_json.extend(res_array)
             
     if not final_merged_json:
-        # Nếu đã thử lại nhiều lần mà vẫn rớt mạng hết, báo lỗi lịch sự thay vì crash ngầm
         return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang quá tải (Lỗi 429) hoặc file quá phức tạp. Vui lòng đợi 1 phút và thử lại."})
 
     return {"result": final_merged_json}
 
-@app.get("/api/tts")
-async def get_tts(text: str = Query(...), lang: str = "vi"):
-    if not text or not text.strip():
-        return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
-        
-    target_url = "https://translate.googleapis.com/translate_tts"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
-    
-    async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
-            for chunk in text_chunks:
-                if not chunk.strip():
-                    continue
-                params = {"client": "gtx", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
-                try:
-                    async with client.stream("GET", target_url, params=params, headers=headers, timeout=15.0) as r:
-                        if r.status_code == 200 and "audio" in r.headers.get("content-type", "").lower():
-                            async for data in r.aiter_bytes():
-                                yield data
-                except Exception:
-                    pass
 
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
-
-class BulkTTSRequest(BaseModel):
-    texts: list[str]
-    lang: str = "vi"
+# ==========================================
+# PHẦN TTS MỚI DÙNG gTTS (CHỐNG LỖI FILE RỖNG)
+# ==========================================
 
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
-        
-    target_url = "https://translate.googleapis.com/translate_tts"
-    # Nâng cấp Header: Thêm Referer giả dạng đang dùng web Google Dịch thật
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://translate.google.com/"
-    }
-    text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
-    
-    async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
-            for chunk in text_chunks:
-                if not chunk.strip():
-                    continue
-                params = {"client": "gtx", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
-                
-                # CƠ CHẾ SỐNG CÒN: Thử lại tối đa 3 lần nếu Google dở chứng chặn 429
-                for attempt in range(3):
-                    try:
-                        # Đổi từ stream sang get cho từng câu ngắn để tránh rớt gói tin
-                        resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
-                        if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
-                            yield resp.content
-                            break  # Thành công thì thoát vòng lặp thử lại
-                        elif resp.status_code == 429:
-                            await asyncio.sleep(1.5)  # Bị chặn thì ngoan ngoãn đợi 1.5 giây
-                    except Exception:
-                        if attempt < 2:
-                            await asyncio.sleep(1.5)
-                            
-                # Bắt buộc nghỉ 0.5 giây giữa các câu để né hệ thống quét spam của Google
-                await asyncio.sleep(0.5)
 
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+    try:
+        def create_audio():
+            tts = gTTS(text=text, lang=lang)
+            fp = io.BytesIO()
+            tts.write_to_fp(fp)
+            fp.seek(0)
+            return fp
+
+        audio_data = await asyncio.to_thread(create_audio)
+        return StreamingResponse(audio_data, media_type="audio/mpeg")
+        
+    except Exception as e:
+        print(f"Lỗi TTS: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo âm thanh: {str(e)}"})
+
 
 class BulkTTSRequest(BaseModel):
     texts: list[str]
@@ -357,48 +310,31 @@ class BulkTTSRequest(BaseModel):
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://translate.google.com/"
-    }
-    combined_audio = bytearray()
-    target_url = "https://translate.googleapis.com/translate_tts"
-    
-    async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
-        for text in req.texts:
-            if not text or not text.strip(): 
-                continue
-            text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
-            
-            for chunk in text_chunks:
-                if not chunk.strip():
+    if not req.texts:
+        return JSONResponse(status_code=400, content={"error": "Danh sách văn bản rỗng."})
+
+    try:
+        def create_bulk_audio():
+            combined = io.BytesIO()
+            for text in req.texts:
+                if not text or not text.strip(): 
                     continue
-                params = {"client": "gtx", "ie": "UTF-8", "tl": req.lang, "q": chunk.strip()}
+                tts = gTTS(text=text.strip(), lang=req.lang)
+                tts.write_to_fp(combined)
                 
-                # CƠ CHẾ SỐNG CÒN TƯƠNG TỰ CHO BULK
-                for attempt in range(3):
-                    try:
-                        resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
-                        if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
-                            combined_audio.extend(resp.content)
-                            break
-                        elif resp.status_code == 429:
-                            await asyncio.sleep(1.5)
-                    except Exception:
-                        if attempt < 2:
-                            await asyncio.sleep(1.5)
-                            
-                # Bắt buộc nghỉ ngơi giữa các requests
-                await asyncio.sleep(0.5)
-                
-    if not combined_audio:
-        return JSONResponse(status_code=500, content={"error": "Google TTS đã chặn toàn bộ yêu cầu tải âm thanh (Lỗi 429). Vui lòng đợi vài phút rồi thử lại."})
+            combined.seek(0)
+            return combined
+
+        audio_data = await asyncio.to_thread(create_bulk_audio)
+        return StreamingResponse(
+            audio_data, 
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
+        )
         
-    return StreamingResponse(
-        io.BytesIO(combined_audio), 
-        media_type="audio/mpeg",
-        headers={"Content-Disposition": "attachment; filename=Merged_OCR_AudioBook.mp3"}
-    )
+    except Exception as e:
+        print(f"Lỗi Bulk TTS: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Lỗi tạo audio hàng loạt: {str(e)}"})
 
 if __name__ == "__main__":
     import uvicorn
