@@ -20,14 +20,14 @@ try:
     from docx import Document
     DOCX_AVAILABLE = True
 except ImportError:
-    print("[WARNING] Chưa cài python-docx.")
+    pass
 
 PYPDF_AVAILABLE = False
 try:
     import PyPDF2
     PYPDF_AVAILABLE = True
 except ImportError:
-    print("[WARNING] Chưa cài PyPDF2. PDF sẽ không được chia trang.")
+    pass
 
 try:
     from dotenv import load_dotenv
@@ -64,7 +64,6 @@ class ExtractRequest(BaseModel):
 
 def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
     if not PYPDF_AVAILABLE:
-        print("[WARNING] Không có PyPDF2, sẽ gửi nguyên file PDF.")
         return [(pdf_b64, "application/pdf")]
         
     try:
@@ -73,7 +72,6 @@ def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
         
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(pdf_reader.pages)
-        print(f"[INFO] Phát hiện tệp PDF. Tổng số trang: {total_pages}")
         
         pages_b64_list = []
         for i in range(total_pages):
@@ -91,14 +89,11 @@ def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
             output_stream.close()
             
         return pages_b64_list
-    except Exception as e:
-        print(f"[ERROR] Lỗi phân tách trang PDF: {str(e)}")
+    except Exception:
         return [(pdf_b64, "application/pdf")]
 
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR (ASYNC) ==========")
-    
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return JSONResponse(status_code=500, content={"error": "Chưa cấu hình GEMINI_API_KEY."})
@@ -134,7 +129,8 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             try:
                 doc = Document(io.BytesIO(base64.b64decode(clean_b64)))
                 extracted_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text}"})
+                for i in range(0, len(extracted_text), 3000):
+                    items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+3000]}"})
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
                 
@@ -145,7 +141,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 MAX_HEIGHT = 1000  
                 
                 if height > MAX_HEIGHT:
-                    print(f"[INFO] Ảnh cao {height}px. Tiến hành cắt mảnh {MAX_HEIGHT}px...")
                     for i in range(0, height, MAX_HEIGHT):
                         box = (0, i, width, min(i + MAX_HEIGHT, height))
                         chunk_img = img.crop(box)
@@ -168,7 +163,11 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
         else:
             items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
 
-    if not items_to_scan and not req.rawText:
+    if req.rawText:
+        for i in range(0, len(req.rawText), 3000):
+            items_to_scan.append({"type": "text", "content": req.rawText[i:i+3000]})
+
+    if not items_to_scan:
         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
 
     max_concurrent_tasks = 5  
@@ -176,7 +175,7 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
     
     json_schema = {
         "type": "ARRAY",
-        "description": "Danh sách các đoạn văn bản trích xuất được. Chủ động chia nhỏ thành nhiều phần tử nếu tài liệu dài.",
+        "description": "Danh sách các đoạn văn bản trích xuất được.",
         "items": {
             "type": "OBJECT",
             "properties": {
@@ -195,16 +194,11 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
     
     async def process_single_page(idx: int, item: dict, client: httpx.AsyncClient):
         async with semaphore:
-            print(f"[INFO] Đang thực thi OCR tác vụ {idx + 1}/{len(items_to_scan)}...")
-            
             parts = []
             if item["type"] == "text":
                 parts.append({"text": item["content"]})
             else:
                 parts.append({"inlineData": {"mimeType": item["mime"], "data": item["b64"]}})
-                
-            if req.rawText:
-                parts.append({"text": req.rawText})
                 
             parts.append({"text": PROMPT_TEXT})
             
@@ -227,39 +221,25 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             try:
                 resp = await client.post(url, json=payload, timeout=120.0)
                 if resp.status_code != 200:
-                    print(f"[LỖI TÁC VỤ {idx + 1}] Gemini API lỗi: {resp.text}")
                     return []
                     
                 data = resp.json()
                 candidate = data.get("candidates", [])[0]
                 raw_result = candidate["content"]["parts"][0]["text"].strip()
                 
-                if raw_result.startswith("```json"):
-                    raw_result = raw_result[7:]
-                elif raw_result.startswith("```"):
-                    raw_result = raw_result[3:]
-                if raw_result.endswith("```"):
-                    raw_result = raw_result[:-3]
-                raw_result = raw_result.strip()
-                
                 parsed_json = json.loads(raw_result)
-                print(f"[THÀNH CÔNG TÁC VỤ {idx + 1}] Trích xuất được {len(parsed_json)} đoạn.")
                 return parsed_json
-            except json.JSONDecodeError as json_err:
-                print(f"[WARNING] Chuỗi JSON bị cắt ngang. Đang cố gắng khôi phục dữ liệu...")
+            except json.JSONDecodeError:
                 try:
                     last_brace = raw_result.rfind('}')
                     if last_brace != -1:
                         fixed_raw = raw_result[:last_brace+1] + ']'
                         parsed_json = json.loads(fixed_raw)
-                        print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
                         return parsed_json
                 except Exception:
                     pass
-                print(f"[LỖI HỆ THỐNG TÁC VỤ {idx + 1}] Phản hồi không phải JSON hợp lệ: {json_err}")
                 return []
-            except Exception as e:
-                print(f"[LỖI TÁC VỤ {idx + 1}] Lỗi mạng hoặc thực thi: {e}")
+            except Exception:
                 return []
 
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
@@ -278,7 +258,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
     if not final_merged_json:
         return JSONResponse(status_code=500, content={"error": "OCR thất bại trên tất cả các trang. Vui lòng thử lại."})
 
-    print(f"\n[HOÀN TẤT] Tổng cộng đã quét thành công {len(final_merged_json)} đoạn OCR.")
     return {"result": final_merged_json}
 
 @app.get("/api/tts")
@@ -286,21 +265,26 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
         
-    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    text_chunks = textwrap.wrap(text, width=200, break_long_words=False)
+    target_url = "https://translate.google.com/translate_tts"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://translate.google.com/"
+    }
+    text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
     
     async def stream_audio():
         async with httpx.AsyncClient(trust_env=False) as client:
             for chunk in text_chunks:
-                params = {"client": "gtx", "ie": "UTF-8", "tl": lang, "q": chunk}
+                if not chunk.strip():
+                    continue
+                params = {"client": "tw-ob", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
                 try:
-                    async with client.stream("GET", target_url, params=params, headers=headers) as r:
+                    async with client.stream("GET", target_url, params=params, headers=headers, timeout=15.0) as r:
                         if r.status_code == 200:
                             async for data in r.aiter_bytes():
                                 yield data
-                except Exception as e:
-                    print(f"[TTS STREAM ERROR]: {e}")
+                except Exception:
+                    pass
 
     return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
@@ -310,24 +294,29 @@ class BulkTTSRequest(BaseModel):
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
-    print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://translate.google.com/"
+    }
     combined_audio = bytearray()
-    target_url = "[https://translate.googleapis.com/translate_tts](https://translate.googleapis.com/translate_tts)"
+    target_url = "https://translate.google.com/translate_tts"
     
     async with httpx.AsyncClient(trust_env=False) as client:
         for text in req.texts:
-            if not text or not text.strip(): continue
-            text_chunks = textwrap.wrap(text, width=200, break_long_words=False)
+            if not text or not text.strip(): 
+                continue
+            text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
             
             for chunk in text_chunks:
-                params = {"client": "gtx", "ie": "UTF-8", "tl": req.lang, "q": chunk}
+                if not chunk.strip():
+                    continue
+                params = {"client": "tw-ob", "ie": "UTF-8", "tl": req.lang, "q": chunk.strip()}
                 try:
                     resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
                     if resp.status_code == 200:
                         combined_audio.extend(resp.content)
-                except Exception as e:
-                    print(f"[WARNING] Bỏ qua đoạn lỗi mạng: {e}")
+                except Exception:
+                    pass
                 
     if not combined_audio:
         return JSONResponse(status_code=500, content={"error": "Không thể tải audio."})
