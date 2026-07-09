@@ -6,6 +6,7 @@ import io
 import base64
 import asyncio
 import textwrap
+import hashlib # Thêm thư viện để tạo cache
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -46,8 +47,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Tạo thư mục static và thư mục cache cho TTS
 if not os.path.exists("static"):
     os.makedirs("static")
+if not os.path.exists("tts_cache"):
+    os.makedirs("tts_cache")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -102,6 +106,7 @@ async def extract_text(req: ExtractRequest):
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
+    # Đã sửa lại PROMPT để ép buộc cách dòng bằng \n\n, giúp hiển thị không bị dính chữ
     PROMPT_TEXT = r"""
 Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
 
@@ -109,8 +114,9 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
 - BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG giải bài tập.
 - Chia nhỏ nội dung ra làm nhiều phần tử. Cứ xong 2-3 câu văn, hoặc 1 câu hỏi trắc nghiệm thì tạo một object mới.
 
-📐 QUY TẮC "visual" (Nội dung gốc):
-- KHÔNG DÙNG THẺ HTML. Dùng `\n\n` để ngắt đoạn.
+📐 QUY TẮC "visual" (Nội dung gốc - SỬA HIỂN THỊ RÕ RÀNG):
+- KHÔNG DÙNG THẺ HTML. 
+- BẮT BUỘC dùng `\n\n` (hai dấu xuống dòng) để ngắt đoạn, ngắt câu hỏi. Phải đảm bảo khoảng cách rộng rãi, KHÔNG để các dòng dính liền nhau.
 - Công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. Inline: bọc bằng `$`. Block: bọc bằng `$$`.
 
 🚨 QUY TẮC "spoken" (Đọc TTS):
@@ -129,9 +135,13 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
                 return JSONResponse(status_code=500, content={"error": "Thiếu thư viện python-docx."})
             try:
                 doc = Document(io.BytesIO(base64.b64decode(clean_b64)))
-                extracted_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-                for i in range(0, len(extracted_text), 3000):
-                    items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+3000]}"})
+                # Đã sửa \n thành \n\n để hiển thị đẹp hơn
+                extracted_text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                
+                # Giảm chunk từ 3000 xuống 1500 để load nhanh hơn, tránh timeout
+                CHUNK_SIZE = 1500 
+                for i in range(0, len(extracted_text), CHUNK_SIZE):
+                    items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+CHUNK_SIZE]}"})
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
                 
@@ -139,7 +149,14 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             try:
                 img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
                 width, height = img.size
-                MAX_HEIGHT = 1000  
+                
+                # Khắc phục lỗi số 2: Resize nếu ảnh quá rộng và chia nhỏ MAX_HEIGHT gắt hơn
+                if width > 1500:
+                    ratio = 1500 / width
+                    img = img.resize((1500, int(height * ratio)), Image.Resampling.LANCZOS)
+                    width, height = img.size
+
+                MAX_HEIGHT = 600  # Giảm từ 1000 xuống 600 để chia nhỏ hơn nữa
                 
                 if height > MAX_HEIGHT:
                     for i in range(0, height, MAX_HEIGHT):
@@ -165,8 +182,9 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
 
     if req.rawText:
-        for i in range(0, len(req.rawText), 3000):
-            items_to_scan.append({"type": "text", "content": req.rawText[i:i+3000]})
+        CHUNK_SIZE = 1500 # Giảm từ 3000 xuống 1500
+        for i in range(0, len(req.rawText), CHUNK_SIZE):
+            items_to_scan.append({"type": "text", "content": req.rawText[i:i+CHUNK_SIZE]})
 
     if not items_to_scan:
         return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
@@ -182,7 +200,7 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             "properties": {
                 "visual": {
                     "type": "STRING",
-                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX."
+                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX. LUÔN cách đoạn bằng \n\n"
                 },
                 "spoken": {
                     "type": "STRING",
@@ -273,13 +291,14 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
             final_merged_json.extend(res_array)
             
     if not final_merged_json:
-        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang bận. Vui lòng thử lại."})
+        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang bận hoặc file quá phức tạp. Vui lòng thử lại."})
 
     return {"result": final_merged_json}
 
 
 # ==============================================================
-# HỆ THỐNG TTS MỚI: DỌN SẠCH KÝ TỰ CẤM VÀ ĐÓNG GÓI 1 FILE CHUẨN
+# HỆ THỐNG TTS: ĐÃ TÍCH HỢP CACHING ĐỂ KHÔNG PHẢI GỌI LẠI SERVER
+# Bỏ route trùng lặp, dùng bản tốt nhất
 # ==============================================================
 
 def clean_ssml_chars(text: str) -> str:
@@ -296,39 +315,31 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     voice = "vi-VN-HoaiMyNeural" if "vi" in lang.lower() else "en-US-AriaNeural"
     clean_text = clean_ssml_chars(text.strip())
 
+    # Khắc phục lỗi số 1: Caching Audio bằng Hash
+    text_hash = hashlib.md5(f"{clean_text}_{voice}".encode('utf-8')).hexdigest()
+    cache_path = os.path.join("tts_cache", f"{text_hash}.mp3")
+
+    # Nếu đã từng sinh audio này, trả về ngay lập tức (Không tốn tgian load)
+    if os.path.exists(cache_path):
+        return FileResponse(cache_path, media_type="audio/mpeg")
+
     try:
         communicate = edge_tts.Communicate(clean_text, voice)
         audio_data = bytearray()
         
-        # Gom toàn bộ âm thanh thành 1 cục duy nhất
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio_data.extend(chunk["data"])
                 
-        # Trả về Response nguyên khối để trình duyệt biết độ dài, không tự tắt ngang
+        # Lưu lại cache cho lần sau
+        with open(cache_path, "wb") as f:
+            f.write(audio_data)
+
         return Response(content=bytes(audio_data), media_type="audio/mpeg")
         
     except Exception as e:
         print(f"Lỗi Edge TTS: {e}")
         return JSONResponse(status_code=500, content={"error": f"Lỗi âm thanh: {str(e)}"})
-
-
-class BulkTTSRequest(BaseModel):
-    texts: list[str]
-    lang: str = "vi"
-
-@app.get("/api/tts")
-async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={lang}&q={text}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    async def stream_audio():
-        async with httpx.AsyncClient() as client:
-            async with client.stream("GET", target_url, headers=headers) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
-
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
 
 # ==========================================
 # 3. API GHÉP NỐI MP3 HÀNG LOẠT 
@@ -347,6 +358,9 @@ async def bulk_tts(req: BulkTTSRequest):
         for text in req.texts:
             if not text or not text.strip():
                 continue
+            
+            # Có thể bổ sung cơ chế cache tại đây nếu muốn, 
+            # nhưng tạm giữ nguyên luồng Google TTS Bulk theo cấu trúc gốc.
             target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
             try:
                 resp = await client.get(target_url, headers=headers, timeout=15.0)
