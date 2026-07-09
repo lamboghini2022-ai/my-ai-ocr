@@ -265,22 +265,21 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     if not text or not text.strip():
         return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
         
-    target_url = "https://translate.google.com/translate_tts"
+    target_url = "https://translate.googleapis.com/translate_tts"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://translate.google.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     text_chunks = textwrap.wrap(text, width=150, break_long_words=False)
     
     async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False) as client:
+        async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
             for chunk in text_chunks:
                 if not chunk.strip():
                     continue
-                params = {"client": "tw-ob", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
+                params = {"client": "gtx", "ie": "UTF-8", "tl": lang, "q": chunk.strip()}
                 try:
                     async with client.stream("GET", target_url, params=params, headers=headers, timeout=15.0) as r:
-                        if r.status_code == 200:
+                        if r.status_code == 200 and "audio" in r.headers.get("content-type", "").lower():
                             async for data in r.aiter_bytes():
                                 yield data
                 except Exception:
@@ -295,13 +294,12 @@ class BulkTTSRequest(BaseModel):
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://translate.google.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     combined_audio = bytearray()
-    target_url = "https://translate.google.com/translate_tts"
+    target_url = "https://translate.googleapis.com/translate_tts"
     
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False, proxies=None, follow_redirects=True) as client:
         for text in req.texts:
             if not text or not text.strip(): 
                 continue
@@ -310,10 +308,10 @@ async def bulk_tts(req: BulkTTSRequest):
             for chunk in text_chunks:
                 if not chunk.strip():
                     continue
-                params = {"client": "tw-ob", "ie": "UTF-8", "tl": req.lang, "q": chunk.strip()}
+                params = {"client": "gtx", "ie": "UTF-8", "tl": req.lang, "q": chunk.strip()}
                 try:
                     resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
-                    if resp.status_code == 200:
+                    if resp.status_code == 200 and "audio" in resp.headers.get("content-type", "").lower():
                         combined_audio.extend(resp.content)
                 except Exception:
                     pass
