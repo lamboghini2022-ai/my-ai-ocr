@@ -5,3 +5,4 @@ pillow
 python-docx
 pypdf2
 python-dotenv
+pip install gTTS
