@@ -4,22 +4,33 @@ import httpx
 import re
 import io
 import base64
+import asyncio
+import textwrap
+import hashlib # Thêm thư viện để tạo cache
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+import edge_tts  
 
-# Thử tải thư viện đọc file Word và đặt cờ (flag)
+from PIL import Image
+
 DOCX_AVAILABLE = False
 try:
     from docx import Document
     DOCX_AVAILABLE = True
 except ImportError:
-    print("[WARNING] Chưa cài python-docx. Hãy chạy: pip install python-docx (và thêm vào requirements.txt)")
+    pass
 
-# Thử tải biến môi trường từ file .env nếu chạy local
+PYPDF_AVAILABLE = False
+try:
+    import PyPDF2
+    PYPDF_AVAILABLE = True
+except ImportError:
+    pass
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -28,19 +39,19 @@ except ImportError:
 
 app = FastAPI(title="SaaS OCR Reader Backend")
 
-# ==========================================
-# CẤU HÌNH CORS MIDDLEWARE (Quan trọng cho Render)
-# ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cho phép HTML local truy cập vào Render
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Tạo thư mục static và thư mục cache cho TTS
 if not os.path.exists("static"):
     os.makedirs("static")
+if not os.path.exists("tts_cache"):
+    os.makedirs("tts_cache")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -48,12 +59,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root_endpoint():
     return JSONResponse(content={
         "status": "online",
-        "message": "Backend OCR Reader (Sync với May_Doc_Sach.html) đang chạy!",
-        "endpoints": {
-            "OCR & Extract": "/api/extract [POST]",
-            "TTS Stream": "/api/tts [GET]",
-            "TTS Bulk Download": "/api/tts/bulk [POST]"
-        }
+        "message": "Backend OCR Reader (Async) đang chạy cực mượt!",
     })
 
 class ExtractRequest(BaseModel):
@@ -61,165 +67,282 @@ class ExtractRequest(BaseModel):
     mimeType: Optional[str] = None
     rawText: Optional[str] = None
 
-# ==========================================
-# 1. API XỬ LÝ OCR & TRÍCH XUẤT QUA GEMINI
-# ==========================================
+def split_pdf_base64_to_pages(pdf_b64: str) -> list[tuple[str, str]]:
+    if not PYPDF_AVAILABLE:
+        return [(pdf_b64, "application/pdf")]
+        
+    try:
+        clean_b64 = re.sub(r'^data:[a-zA-Z0-9/+]+;base64,', '', pdf_b64)
+        pdf_bytes = base64.b64decode(clean_b64)
+        
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(pdf_reader.pages)
+        
+        pages_b64_list = []
+        for i in range(total_pages):
+            pdf_writer = PyPDF2.PdfWriter()
+            pdf_writer.add_page(pdf_reader.pages[i])
+            
+            output_stream = io.BytesIO()
+            pdf_writer.write(output_stream)
+            page_bytes = output_stream.getvalue()
+            
+            page_b64 = base64.b64encode(page_bytes).decode('utf-8')
+            pages_b64_list.append((page_b64, "application/pdf"))
+            
+            del pdf_writer
+            output_stream.close()
+            
+        return pages_b64_list
+    except Exception:
+        return [(pdf_b64, "application/pdf")]
+
 @app.post("/api/extract") 
 async def extract_text(req: ExtractRequest):
-    print("\n========== BẮT ĐẦU XỬ LÝ YÊU CẦU OCR ==========")
-    
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[LỖI] Thiếu cấu hình GEMINI_API_KEY")
-        return JSONResponse(
-            status_code=500, 
-            content={"error": "Chưa cấu hình biến môi trường GEMINI_API_KEY trên Render."}
-        )
+        return JSONResponse(status_code=500, content={"error": "Chưa cấu hình GEMINI_API_KEY."})
 
     model_name = "gemini-2.5-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # PROMPT MỚI: Bổ sung quy tắc sống còn chặn AI tự chế/giải bài tập
+    # Đã sửa lại PROMPT để ép buộc cách dòng bằng \n\n, giúp hiển thị không bị dính chữ
     PROMPT_TEXT = r"""
-Bạn là một Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung và BẮT BUỘC trả về định dạng JSON là một MẢNG (ARRAY) CHỨA CÁC OBJECT. 
+Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm vụ của bạn là số hóa nội dung một cách chính xác tuyệt đối.
 
-🚨 QUY TẮC SỐNG CÒN (KHÔNG ĐƯỢC VI PHẠM):
-- TUYỆT ĐỐI BÁM SÁT nội dung gốc hiển thị trong tài liệu.
-- KHÔNG TỰ BỊA THÊM CHỮ, KHÔNG tự ý giải bài tập, KHÔNG đưa ra đáp án nếu tài liệu không có.
-- Chỉ làm nhiệm vụ của một máy đọc (OCR) thuần túy.
+🚨 QUY TẮC SỐNG CÒN:
+- BÁM SÁT nội dung gốc. KHÔNG TỰ BỊA CHỮ, KHÔNG giải bài tập.
+- Chia nhỏ nội dung ra làm nhiều phần tử. Cứ xong 2-3 câu văn, hoặc 1 câu hỏi trắc nghiệm thì tạo một object mới.
 
-Cấu trúc JSON bắt buộc:
-[
-  {
-    "visual": "Đề kiểm tra môn Vật Lý\n\nCâu 1: Tính vận tốc...",
-    "spoken": "Đề kiểm tra môn Vật Lý. Câu một: Tính vận tốc..."
-  }
-]
+📐 QUY TẮC "visual" (Nội dung gốc - SỬA HIỂN THỊ RÕ RÀNG):
+- KHÔNG DÙNG THẺ HTML. 
+- BẮT BUỘC dùng `\n\n` (hai dấu xuống dòng) để ngắt đoạn, ngắt câu hỏi. Phải đảm bảo khoảng cách rộng rãi, KHÔNG để các dòng dính liền nhau.
+- Công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX. Inline: bọc bằng `$`. Block: bọc bằng `$$`.
 
-📐 QUY TẮC CHO "visual" (GIAO DIỆN HIỂN THỊ TRÊN MÀN HÌNH):
-- KHÔNG DÙNG THẺ HTML (vì Frontend dùng textContent). Hãy dùng ký tự ngắt dòng `\n\n` để chia đoạn, tạo khoảng trắng giúp giao diện dễ nhìn.
-- Mọi công thức Toán/Lý/Hóa BẮT BUỘC dùng mã LaTeX.
-- Công thức trong dòng (Inline): Bọc bằng `$`. Ví dụ: `$v = s/t$`
-- Công thức đứng riêng (Block): Bọc bằng `$$`. Ví dụ: `$$F = m \cdot a$$`
-- LƯU Ý JSON: Phải nhân đôi dấu gạch chéo ngược cho lệnh LaTeX để không làm hỏng cú pháp JSON (Ví dụ: `\\frac{a}{b}`, `\\sqrt{x}`, `\\Delta`).
-
-🚨 QUY TẮC CHO "spoken" (ĐỂ CHUYỂN THÀNH GIỌNG NÓI TTS):
-- Chia nội dung thành các câu ngắn. Mỗi object trong mảng chỉ nên chứa 1-2 câu (khoảng 15-30 từ) để máy đọc không bị ngắt quãng.
-- KHÔNG chứa mã LaTeX. Phải dịch công thức thành tiếng Việt (Ví dụ: "H hai O", "x bình phương cộng y bình phương", "căn bậc hai của x").
-- Chỉ chứa chữ cái, số và dấu câu cơ bản (, . ! ?).
+🚨 QUY TẮC "spoken" (Đọc TTS):
+- Dịch hoàn toàn ra tiếng Việt trơn (vd: $v$ -> "vận tốc", $\frac{1}{2}$ -> "một phần hai").
+- Không chứa ký hiệu Toán học/LaTeX, chia thành câu ngắn.
+🚫 QUY TẮC XỬ LÝ KHOẢNG TRỐNG ĐIỀN TỪ (DẤU CHẤM/GẠCH DƯỚI):\n
+- Đối với các dòng dấu chấm (.........) hoặc nét đứt trong ảnh gốc: BẮT BUỘC CHUYỂN ĐỔI TOÀN BỘ THÀNH DẤU GẠCH DƯỚI (_________).\n
+- Hãy xuất ra một dải gạch dưới dài tương đối (khoảng từ 10 đến 30 dấu gạch). TUYỆT ĐỐI KHÔNG được lặp vô tận gây lỗi.\n\n
     """
 
-    parts = []
+    items_to_scan = [] 
+
     if req.fileBase64 and req.mimeType:
-        # VÁ LỖI TẠI ĐÂY: Dùng split(",") thay vì regex để không bao giờ bị lỗi do MIME type dài
-        if "," in req.fileBase64:
-            clean_b64 = req.fileBase64.split(",", 1)[1]
-        else:
-            clean_b64 = req.fileBase64
-            
+        clean_b64 = req.fileBase64.split(",", 1)[1] if "," in req.fileBase64 else req.fileBase64
         mime_type_lower = req.mimeType.lower()
         
-        # Nhận diện file Word (kiểm tra cả docx và ms-word)
         if "wordprocessingml.document" in mime_type_lower or "msword" in mime_type_lower:
             if not DOCX_AVAILABLE:
-                return JSONResponse(status_code=500, content={"error": "Hệ thống thiếu thư viện python-docx. Hãy thêm 'python-docx' vào file requirements.txt trên server."})
-            
+                return JSONResponse(status_code=500, content={"error": "Thiếu thư viện python-docx."})
             try:
-                print("[INFO] Đang bóc tách text từ file Word (.docx)...")
-                doc_bytes = base64.b64decode(clean_b64)
-                doc = Document(io.BytesIO(doc_bytes))
-                extracted_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+                doc = Document(io.BytesIO(base64.b64decode(clean_b64)))
+                # Đã sửa \n thành \n\n để hiển thị đẹp hơn
+                extracted_text = "\n\n".join([p.text for p in doc.paragraphs if p.text.strip()])
                 
-                if not extracted_text.strip():
-                    return JSONResponse(status_code=400, content={"error": "File Word này bị trống hoặc chỉ chứa toàn hình ảnh, không có văn bản nào để trích xuất."})
-                    
-                parts.append({"text": f"Nội dung file tài liệu Word được cung cấp:\n{extracted_text}"})
+                # Giảm chunk từ 3000 xuống 1500 để load nhanh hơn, tránh timeout
+                CHUNK_SIZE = 1500 
+                for i in range(0, len(extracted_text), CHUNK_SIZE):
+                    items_to_scan.append({"type": "text", "content": f"Nội dung file Word:\n{extracted_text[i:i+CHUNK_SIZE]}"})
             except Exception as e:
-                print(f"[ERROR] Lỗi đọc file Word: {e}")
-                return JSONResponse(status_code=400, content={"error": f"Lỗi đọc file Word. Hãy chắc chắn đây là file định dạng .docx (đời mới), không hỗ trợ file .doc cũ. Chi tiết: {str(e)}"})
-        else:
-            # Nếu là PDF/Ảnh thì gửi file vào inlineData cho Gemini tự đọc
-            parts.append({"inlineData": {"mimeType": req.mimeType, "data": clean_b64}})
-        
-    if req.rawText:
-        parts.append({"text": req.rawText})
-    
-    parts.append({"text": PROMPT_TEXT})
+                return JSONResponse(status_code=400, content={"error": f"Lỗi đọc Word: {e}"})
+                
+        elif mime_type_lower.startswith("image/"):
+            try:
+                img = Image.open(io.BytesIO(base64.b64decode(clean_b64)))
+                width, height = img.size
+                
+                # Khắc phục lỗi số 2: Resize nếu ảnh quá rộng và chia nhỏ MAX_HEIGHT gắt hơn
+                if width > 1500:
+                    ratio = 1500 / width
+                    img = img.resize((1500, int(height * ratio)), Image.Resampling.LANCZOS)
+                    width, height = img.size
 
-    payload = {
-        "contents": [{"parts": parts}],
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ],
-        "generationConfig": {
-            "temperature": 0.2,  # ÉP NHIỆT ĐỘ VỀ 0.0 ĐỂ KHÔNG ĐƯỢC TỰ BỊA CHỮ
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json" 
+                MAX_HEIGHT = 600  # Giảm từ 1000 xuống 600 để chia nhỏ hơn nữa
+                
+                if height > MAX_HEIGHT:
+                    for i in range(0, height, MAX_HEIGHT):
+                        box = (0, i, width, min(i + MAX_HEIGHT, height))
+                        chunk_img = img.crop(box)
+                        buffered = io.BytesIO()
+                        if chunk_img.mode in ("RGBA", "P"):
+                            chunk_img = chunk_img.convert("RGB")
+                        chunk_img.save(buffered, format="JPEG", quality=85)
+                        chunk_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                        items_to_scan.append({"type": "inline", "b64": chunk_b64, "mime": "image/jpeg"})
+                else:
+                    items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
+            except Exception as e:
+                return JSONResponse(status_code=400, content={"error": f"Lỗi xử lý ảnh: {e}"})
+                
+        elif "application/pdf" in mime_type_lower:
+            pdf_pages = split_pdf_base64_to_pages(clean_b64)
+            for page_b64, p_mime in pdf_pages:
+                items_to_scan.append({"type": "inline", "b64": page_b64, "mime": p_mime})
+                
+        else:
+            items_to_scan.append({"type": "inline", "b64": clean_b64, "mime": req.mimeType})
+
+    if req.rawText:
+        CHUNK_SIZE = 1500 # Giảm từ 3000 xuống 1500
+        for i in range(0, len(req.rawText), CHUNK_SIZE):
+            items_to_scan.append({"type": "text", "content": req.rawText[i:i+CHUNK_SIZE]})
+
+    if not items_to_scan:
+        return JSONResponse(status_code=400, content={"error": "Không có dữ liệu đầu vào."})
+
+    max_concurrent_tasks = 5  
+    semaphore = asyncio.Semaphore(max_concurrent_tasks)
+    
+    json_schema = {
+        "type": "ARRAY",
+        "description": "Danh sách các đoạn văn bản trích xuất được.",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "visual": {
+                    "type": "STRING",
+                    "description": "Văn bản gốc giữ nguyên bố cục. Công thức dùng mã LaTeX. LUÔN cách đoạn bằng \n\n"
+                },
+                "spoken": {
+                    "type": "STRING",
+                    "description": "Văn bản dịch thuần tiếng Việt để đọc TTS."
+                }
+            },
+            "required": ["visual", "spoken"]
         }
     }
-
-    async with httpx.AsyncClient(trust_env=False) as client:
-        try:
-            print("[INFO] Đang chuyển tiếp gói tin đến Google Gemini API...")
-            response = await client.post(url, json=payload, timeout=60.0)
-            
-            if response.status_code != 200:
-                print(f"[API ERROR] Google API trả về mã lỗi: {response.status_code}")
-                return JSONResponse(status_code=response.status_code, content={"error": f"Lỗi Gemini: {response.text}"})
-            
-            data = response.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return JSONResponse(status_code=400, content={"error": "Bị chặn bởi chính sách an toàn đầu vào."})
+    
+    async def process_single_page(idx: int, item: dict, client: httpx.AsyncClient):
+        async with semaphore:
+            parts = []
+            if item["type"] == "text":
+                parts.append({"text": item["content"]})
+            else:
+                parts.append({"inlineData": {"mimeType": item["mime"], "data": item["b64"]}})
                 
-            candidate = candidates[0]
-            if "content" not in candidate:
-                return JSONResponse(status_code=400, content={"error": "AI vi phạm bộ lọc đầu ra."})
+            parts.append({"text": PROMPT_TEXT})
+            
+            payload = {
+                "contents": [{"parts": parts}],
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                ],
+                "generationConfig": {
+                    "temperature": 0.0, 
+                    "maxOutputTokens": 8192,
+                    "responseMimeType": "application/json",
+                    "responseSchema": json_schema
+                }
+            }
+            
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    resp = await client.post(url, json=payload, timeout=120.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidate = data.get("candidates", [])[0]
+                        raw_result = candidate["content"]["parts"][0]["text"].strip()
+                        
+                        try:
+                            parsed_json = json.loads(raw_result)
+                            return parsed_json
+                        except json.JSONDecodeError:
+                            try:
+                                last_brace = raw_result.rfind('}')
+                                if last_brace != -1:
+                                    fixed_raw = raw_result[:last_brace+1] + ']'
+                                    parsed_json = json.loads(fixed_raw)
+                                    return parsed_json
+                            except Exception:
+                                pass
+                            return []
+                            
+                    elif resp.status_code in [429, 503]:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** (attempt + 1))
+                            continue
+                        return []
+                    else:
+                        print(f"Lỗi API Gemini - Mã: {resp.status_code}")
+                        return []
+                        
+                except Exception as e:
+                    print(f"Lỗi kết nối Gemini: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** (attempt + 1))
+                        continue
+                    return []
+            return []
 
-            raw_result = candidate["content"]["parts"][0]["text"].strip()
-            
-            # Vá luôn lỗi AI thỉnh thoảng dư dấu phẩy ở cuối mảng JSON
-            raw_result = re.sub(r',\s*([\]}])', r'\1', raw_result)
-            
-            try:
-                parsed_json = json.loads(raw_result, strict=False)
-                print(f"[SUCCESS] Trích xuất thành công {len(parsed_json)} đoạn văn bản.")
-                return {"result": parsed_json} 
-            except json.JSONDecodeError as e:
-                print(f"[CRITICAL ERROR] JSON lỗi định dạng: {e}")
-                return JSONResponse(status_code=500, content={"error": "AI trả về chuỗi JSON không hợp lệ.", "raw": raw_result})
-            
-        except httpx.ReadTimeout:
-            print("[TIMEOUT] Quá thời gian 60 giây.")
-            return JSONResponse(status_code=504, content={"error": "Quá thời gian phản hồi (60 giây)."})
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Lỗi nội bộ: {str(e)}"})
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
+        tasks = [
+            process_single_page(idx, item, client) 
+            for idx, item in enumerate(items_to_scan)
+        ]
+        results = await asyncio.gather(*tasks)
 
-# ==========================================
-# 2. API PROXY GOOGLE TTS (ĐỌC TỪNG CÂU)
-# ==========================================
+    final_merged_json = []
+    for res_array in results:
+        if isinstance(res_array, list):
+            final_merged_json.extend(res_array)
+            
+    if not final_merged_json:
+        return JSONResponse(status_code=500, content={"error": "Máy chủ AI đang bận hoặc file quá phức tạp. Vui lòng thử lại."})
+
+    return {"result": final_merged_json}
+
+
+# ==============================================================
+# HỆ THỐNG TTS: ĐÃ TÍCH HỢP CACHING ĐỂ KHÔNG PHẢI GỌI LẠI SERVER
+# Bỏ route trùng lặp, dùng bản tốt nhất
+# ==============================================================
+
+def clean_ssml_chars(text: str) -> str:
+    """Loại bỏ ký tự gây sập nguồn hệ thống Edge-TTS"""
+    if not text:
+        return ""
+    return text.replace("&", " và ").replace("<", " ").replace(">", " ").replace("#", " ")
+
 @app.get("/api/tts")
 async def get_tts(text: str = Query(...), lang: str = "vi"):
-    target_url = "https://translate.googleapis.com/translate_tts"
-    # Dùng params để HTTPX tự động xử lý dấu cách, chống lỗi sập server
-    params = {
-        "client": "gtx",
-        "ie": "UTF-8",
-        "tl": lang,
-        "q": text
-    }
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    async def stream_audio():
-        async with httpx.AsyncClient(trust_env=False) as client:
-            async with client.stream("GET", target_url, params=params, headers=headers) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+    if not text or not text.strip():
+        return JSONResponse(status_code=400, content={"error": "Văn bản rỗng."})
 
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+    voice = "vi-VN-HoaiMyNeural" if "vi" in lang.lower() else "en-US-AriaNeural"
+    clean_text = clean_ssml_chars(text.strip())
+
+    # Khắc phục lỗi số 1: Caching Audio bằng Hash
+    text_hash = hashlib.md5(f"{clean_text}_{voice}".encode('utf-8')).hexdigest()
+    cache_path = os.path.join("tts_cache", f"{text_hash}.mp3")
+
+    # Nếu đã từng sinh audio này, trả về ngay lập tức (Không tốn tgian load)
+    if os.path.exists(cache_path):
+        return FileResponse(cache_path, media_type="audio/mpeg")
+
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice)
+        audio_data = bytearray()
+        
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.extend(chunk["data"])
+                
+        # Lưu lại cache cho lần sau
+        with open(cache_path, "wb") as f:
+            f.write(audio_data)
+
+        return Response(content=bytes(audio_data), media_type="audio/mpeg")
+        
+    except Exception as e:
+        print(f"Lỗi Edge TTS: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Lỗi âm thanh: {str(e)}"})
 
 # ==========================================
 # 3. API GHÉP NỐI MP3 HÀNG LOẠT 
@@ -233,23 +356,17 @@ async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
-    target_url = "https://translate.googleapis.com/translate_tts"
     
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient() as client:
         for text in req.texts:
             if not text or not text.strip():
                 continue
             
-            # Dùng params để chống lỗi
-            params = {
-                "client": "gtx",
-                "ie": "UTF-8",
-                "tl": req.lang,
-                "q": text
-            }
-            
+            # Có thể bổ sung cơ chế cache tại đây nếu muốn, 
+            # nhưng tạm giữ nguyên luồng Google TTS Bulk theo cấu trúc gốc.
+            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
             try:
-                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
             except Exception as e:
