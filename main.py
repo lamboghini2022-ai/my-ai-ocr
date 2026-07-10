@@ -301,7 +301,6 @@ Bạn là Hệ thống Trích xuất Dữ liệu OCR chuyên nghiệp. Nhiệm v
 
 # ==============================================================
 # HỆ THỐNG TTS: ĐÃ TÍCH HỢP CACHING ĐỂ KHÔNG PHẢI GỌI LẠI SERVER
-# Bỏ route trùng lặp, dùng bản tốt nhất
 # ==============================================================
 
 def clean_ssml_chars(text: str) -> str:
@@ -345,32 +344,72 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
         return JSONResponse(status_code=500, content={"error": f"Lỗi âm thanh: {str(e)}"})
 
 # ==========================================
-# 3. API GHÉP NỐI MP3 HÀNG LOẠT 
+# 3. API GHÉP NỐI MP3 HÀNG LOẠT (ĐÃ SỬA LỖI VÀ BÁO CÁO LỖI CHI TIẾT)
 # ==========================================
 class BulkTTSRequest(BaseModel):
     texts: list[str]
     lang: str = "vi"
+
+def split_text_for_google_tts(text: str, max_chars: int = 150) -> list[str]:
+    """Cắt nhỏ văn bản đảm bảo Google TTS không bị quá tải (dưới 200 ký tự)"""
+    if len(text) <= max_chars:
+        return [text]
+    sentences = re.split(r'(?<=[.,!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 <= max_chars:
+            current_chunk = f"{current_chunk} {sentence}".strip()
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            if len(sentence) > max_chars:
+                words = sentence.split(' ')
+                sub_chunk = ""
+                for word in words:
+                    if len(sub_chunk) + len(word) + 1 <= max_chars:
+                        sub_chunk = f"{sub_chunk} {word}".strip()
+                    else:
+                        chunks.append(sub_chunk)
+                        sub_chunk = word
+                current_chunk = sub_chunk
+            else:
+                current_chunk = sentence
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
 
 @app.post("/api/tts/bulk")
 async def bulk_tts(req: BulkTTSRequest):
     print(f"\n========== TỔNG HỢP AUDIO TỔNG ({len(req.texts)} phần tử) ==========")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     combined_audio = bytearray()
+    target_url = "https://translate.googleapis.com/translate_tts"
     
-    async with httpx.AsyncClient() as client:
-        for text in req.texts:
-            if not text or not text.strip():
-                continue
-            
-            # Có thể bổ sung cơ chế cache tại đây nếu muốn, 
-            # nhưng tạm giữ nguyên luồng Google TTS Bulk theo cấu trúc gốc.
-            target_url = f"https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl={req.lang}&q={text}"
+    # Chia nhỏ text trước khi xử lý để chống gãy URL và quá tải Google TTS
+    final_texts = []
+    for text in req.texts:
+        if text and text.strip():
+            final_texts.extend(split_text_for_google_tts(text.strip(), 150))
+    
+    async with httpx.AsyncClient(trust_env=False) as client:
+        for idx, text in enumerate(final_texts):
+            # Dùng tham số 'params' thay vì nối chuỗi trực tiếp để tránh lỗi ký tự đặc biệt
+            params = {
+                "client": "gtx",
+                "ie": "UTF-8",
+                "tl": req.lang,
+                "q": text
+            }
             try:
-                resp = await client.get(target_url, headers=headers, timeout=15.0)
+                resp = await client.get(target_url, params=params, headers=headers, timeout=15.0)
                 if resp.status_code == 200:
                     combined_audio.extend(resp.content)
+                else:
+                    # In rõ lỗi khi không thể tải đoạn văn bản
+                    print(f"[LỖI GOOGLE TTS] Không thể tải đoạn {idx}. Mã lỗi: {resp.status_code} - Text: '{text[:50]}...'")
             except Exception as e:
-                print(f"[WARNING] Bỏ qua đoạn âm thanh lỗi: {e}")
+                print(f"[WARNING] Kết nối thất bại ở đoạn âm thanh thứ {idx}: {e}")
                 
     if not combined_audio:
         return JSONResponse(status_code=500, content={"error": "Không thể tải audio từ server TTS."})
