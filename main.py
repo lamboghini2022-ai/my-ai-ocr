@@ -103,7 +103,7 @@ async def extract_text(req: ExtractRequest):
     if not api_key:
         return JSONResponse(status_code=500, content={"error": "Chưa cấu hình GEMINI_API_KEY."})
 
-    model_name = "gemini-2.5-flash"
+    model_name = "gemini-3.1-flash-lite"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     # Đã sửa lại PROMPT để ép buộc cách dòng bằng \n\n, giúp hiển thị không bị dính chữ
@@ -321,7 +321,7 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
     text_hash = hashlib.md5(f"{clean_text}_{voice}".encode('utf-8')).hexdigest()
     cache_path = os.path.join("tts_cache", f"{text_hash}.mp3")
 
-    # Nếu đã từng sinh audio này, trả về ngay lập tức (Không tốn tgian load)
+    # Nếu đã từng sinh audio này, trả về ngay lập tức bằng FileResponse (Hỗ trợ Replay)
     if os.path.exists(cache_path):
         return FileResponse(cache_path, media_type="audio/mpeg")
 
@@ -337,7 +337,9 @@ async def get_tts(text: str = Query(...), lang: str = "vi"):
         with open(cache_path, "wb") as f:
             f.write(audio_data)
 
-        return Response(content=bytes(audio_data), media_type="audio/mpeg")
+        # ĐÃ SỬA CHÍ MẠNG Ở ĐÂY: Trả về FileResponse thay vì Response byte thuần
+        # FileResponse tự động gắn header Accept-Ranges cho phép frontend tua và nghe lại từ đầu!
+        return FileResponse(cache_path, media_type="audio/mpeg")
         
     except Exception as e:
         print(f"Lỗi Edge TTS: {e}")
